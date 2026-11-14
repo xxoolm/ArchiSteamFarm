@@ -1,6 +1,27 @@
 # Contributing
 
-Before making an issue or pull request, you should carefully read **[ASF wiki](https://github.com/JustArchiNET/ArchiSteamFarm/wiki)** first. At least reading **[FAQ](https://github.com/JustArchiNET/ArchiSteamFarm/wiki/FAQ)** is mandatory.
+Before making an issue or pull request, you should carefully read **[ASF wiki](https://github.com/JustArchiNET/ArchiSteamFarm/wiki)** first. At least reading **[FAQ](https://github.com/JustArchiNET/ArchiSteamFarm/wiki/FAQ)** is mandatory for understanding the core ASF concepts, avoiding invalid questions, reporting expected issues and other misunderstandings.
+
+---
+
+## AI Disclosure Guidelines
+
+We welcome contributions assisted by AI tools. To maintain transparency, trust, and code quality across this project, all AI-assisted activity **must be disclosed** by leaving appropriate, clearly visible annotation, whether in issue, discussion, pull request, or any (and all) other places where direct community interaction is involved. Disclosure is not a barrier to contribution - it helps maintainers understand context, review more effectively, and make informed decisions.
+
+1. **Disclose any meaningful AI involvement.** If an AI tool generated, rewrote, or significantly shaped your contribution, say so.
+2. **You are accountable.** Submitting AI-generated content means you have reviewed it, understand it, and vouch for its correctness.
+3. **Partial use still counts.** If only a section of your message, code, or comment was AI-assisted, disclose which part.
+4. **Cosmetic assistance is exempt.** Spell-checkers, grammar tools and basic autocomplete do not require disclosure.
+5. **Name the tool when possible.** e.g. "GitHub Copilot", "ChatGPT", "Claude", "Gemini", "Cursor".
+
+The above **especially** applies to:
+- **AI-generated ASF configs**, which are usually incorrect. Using AI-generated ASF configs requires mandatory disclosure in issues and discussions, especially when you ask for support.
+- **AI-generated code**, which tends to be more verbose than needed, very often solving issues that do not exist in reality. Using AI does not exempt you from maintaining the highest quality of the code you're asking us to include, and may require many follow-ups to be accepted.
+- **AI-generated messages**, e.g. in discussions, issues or comments, which tend to suggest false solutions that in fact do not exist in reality, or do not apply to ASF.
+
+Undisclosed AI contributions undermine the community's trust, and may result in appropriate action, including being permanently blocked from the project if we determine that user's (agent's) actions bring more harm than good to the community. Use AI responsibly, you're fully accountable for any (and all) content produced under your name.
+
+---
 
 ## Issues
 
@@ -9,7 +30,7 @@ Before making an issue or pull request, you should carefully read **[ASF wiki](h
 Examples of **invalid** issues:
 - Asking how to install the program or use one of its functions
 - Having technical difficulties running the program in some environment, encountering expected issues caused by the user's neglect
-- Reporting problems that are not caused by ASF, such as ASF-ui issues or Steam not allowing you to log in
+- Reporting problems that are not caused by ASF, such as ASF-ui issues or Steam not allowing you to send trade offers
 - All issues encountered while running ASF in unsupported environment/setup, such as those with modified ASF source, having more bots than our maximum recommended limit or using custom plugins
 - Other activities that are not related to ASF development in any way and do not require any development action from us
 
@@ -35,7 +56,7 @@ It would also be cool if you could reproduce your issue on latest **[pre-release
 
 While everybody is able to create suggestions how to improve ASF, GitHub issues is not the proper place to discuss if your enhancement makes sense - by posting it you already **believe** that it makes sense, and you're **ready to convince us how**. If you have some idea but you're not sure if it's possible, makes sense, or fits ASF purpose - you have our support channels where we'll be happy to discuss given enhancement in calm atmosphere, evaluating possibilities and pros/cons. This is what we suggest to do in the first place, as in GitHub issue you're switching from **having an idea** into **having a valid enhancement with general concept, given purpose and fixed details - you're ready to defend your idea and convince us how it can be useful for ASF**. This is the general reason why many issues are rejected - because you're lacking details that would prove your suggestion being worthy.
 
-ASF has a strict scope - idling Steam cards from Steam games + basic bots management. ASF scope is very subjective and evaluated on practical/moral basis - how much this feature fits ASF, how much actual coding effort is required to make it happen, how useful/wanted this feature is by the community and likewise. In general we don't mind further enhancements to the program, as there is always a room for improvement, but at the same time we consider ASF to be feature-complete and vast majority of things that are suggested today are simply out of the scope of ASF as a program. This is why we've rejected **[a lot](https://github.com/JustArchiNET/ArchiSteamFarm/issues?q=label%3A"✨+Enhancement"+label%3A"👎+Not+going+to+happen")** of general enhancements, for various different reasons, mainly regarding the scope of the program. Some people may find it hard to understand why we're rather sceptical towards suggestions, while the answer for that isn't obvious at first.
+ASF has a strict scope - farming Steam cards from Steam games + basic bots management. ASF scope is very subjective and evaluated on practical/moral basis - how much this feature fits ASF, how much actual coding effort is required to make it happen, how useful/wanted this feature is by the community and likewise. In general we don't mind further enhancements to the program, as there is always a room for improvement, but at the same time we consider ASF to be feature-complete in what we call "active maintenance" state, and vast majority of things that are suggested today are simply out of the scope of ASF as a program. This is why we've rejected **[a lot](https://github.com/JustArchiNET/ArchiSteamFarm/issues?q=label%3A"✨+Enhancement"+label%3A"👎+Not+going+to+happen")** of general enhancements, for various different reasons, mainly regarding the scope of the program. Some people may find it hard to understand why we're rather sceptical towards suggestions, while the answer for that isn't obvious at first.
 
 > In the lifetime of an Open Source project, only 10 percent of the time spent adding a feature will be spent coding it. The other 90 percent will be spent in support of that feature.
 
@@ -51,7 +72,7 @@ In any case, you should be able to explain to us in the issue why you consider y
 
 ## Pull requests
 
-Pull requests are a bit different compared to issues, as in PR you're asking us to review the code and accept it, unless **we** have a reason against it. Very often we won't have enough arguments to accept given suggestion and code something, but we also won't have enough arguments **against** given suggestion, which makes it possible for you to code it yourself, then send a PR for review, and hopefully include your feature in ASF, even if we wouldn't code it otherwise. Such issues are appropriately tagged with **[PR-ok](https://github.com/JustArchiNET/ArchiSteamFarm/issues?q=label%3A"👍+PR-ok"+-label%3A"🏁+Finished")** so you can easily take a look at those features that we wouldn't mind, but neither code ourselves. All of that is possible thanks to the fact that when dealing with PR, **we** are in position to find reasoning against it, and not necessarily you defending your own code. This is how **[a lot](https://github.com/JustArchiNET/ArchiSteamFarm/pulls?q=is%3Apr+is%3Amerged+-label%3A"🤖+Automatic")** of ASF features were actually made possible, but at the same time there are still **[cases](https://github.com/JustArchiNET/ArchiSteamFarm/pulls?q=is%3Apr+is%3Aclosed+label%3A"👎+Not+going+to+happen")** of PRs that we decided to reject.
+Pull requests are a bit different compared to issues, as in PR you're asking us to review the code and accept it, unless **we** have a reason against it. Very often we won't have enough arguments to accept given suggestion and code something, but we also won't have enough arguments **against** given suggestion, which makes it possible for you to code it yourself, then send a PR for review, and hopefully include your feature in ASF, even if we wouldn't code it otherwise. Such issues are appropriately tagged with **[PR-ok](https://github.com/JustArchiNET/ArchiSteamFarm/issues?q=label%3A"👍+PR-ok"+-label%3A"🏁+Finished")** so you can easily take a look at those features that we wouldn't mind, but neither code ourselves. All of that is possible thanks to the fact that when dealing with PR, **we** are in position to find reasoning against it, and not necessarily you defending your own code. This is how **[a lot](https://github.com/JustArchiNET/ArchiSteamFarm/pulls?q=is%3Apr+is%3Amerged+-author%3AJustArchi+-label%3A%22%F0%9F%A4%96+Automatic%22)** of ASF features were actually made possible, but at the same time there are still **[cases](https://github.com/JustArchiNET/ArchiSteamFarm/pulls?q=is%3Apr+is%3Aclosed+label%3A"👎+Not+going+to+happen")** of PRs that we decided to reject.
 
 In general any pull request is welcome and should be accepted, unless there is a strong reason against it. A strong reason includes mainly only things we directly do not agree with, such as features that are against Steam ToS (like explained above), greatly against ASF scope (to the point it'd hurt overall maintenance), or likewise. If there is nothing severe enough to justify rejecting PR, we'll tell you how to fix it (if needed), so we can allow it in ASF. If you're improving existing code, rewriting it to be more efficient, clean, better commented - there is absolutely no reason to reject such PR, as long as it's in fact correct. If you want to add a missing feature, and you're not sure if it should be included in ASF, for example because you're not sure if it fits ASF scope - it won't hurt to ask before spending your own time, preferably on one of our support channels, so we can evaluate the idea and give feedback instead of accepting/rejecting the concept which is usually happening with GitHub issues - after all you want to code it yourself, so you shouldn't use GitHub issues that are being used for expecting us to add things. Still, as stated above, our entire GitHub repo is dedicated to development part of ASF, so feel free to post an issue in which you'll ask if given feature would be accepted in PR, if you prefer that way instead of using the Steam group.
 
@@ -67,7 +88,7 @@ ASF is open-source project, developed mainly by **[JustArchi](https://github.com
 
 ### License
 
-ASF is using **[Apache License 2.0](https://github.com/JustArchiNET/ArchiSteamFarm/blob/main/LICENSE-2.0.txt)**.
+ASF is using **[Apache License 2.0](https://github.com/JustArchiNET/ArchiSteamFarm/blob/main/LICENSE.txt)**.
 
 > Unless You explicitly state otherwise, any Contribution intentionally submitted for inclusion in the Work by You to the Licensor shall be under the terms and conditions of this License, without any additional terms or conditions.
 
@@ -77,10 +98,9 @@ For more info about the license, please check out **[license](https://github.com
 
 ### Code style
 
-Please stick with ASF code style when submitting PRs. In repo you can find several different files dedicated to making it easier for you:
+Please try to stick with ASF code style when submitting PRs. In repo you can find at least several different files dedicated to making it easier for you:
 
 - **[EditorConfig](https://github.com/JustArchiNET/ArchiSteamFarm/blob/main/.editorconfig)** file which is supported by all major IDEs and requires no further setup. It's a good starting point, although it doesn't include all the rules that we'd like to see.
-- **[VS settings](https://github.com/JustArchiNET/ArchiSteamFarm/blob/main/CodeStyle.vssettings)** file that you can use in Visual Studio for import. This one includes far more options than EditorConfig alone, and it's a very good choice if you're using bare VS.
 - **[DotSettings](https://github.com/JustArchiNET/ArchiSteamFarm/blob/main/ArchiSteamFarm.sln.DotSettings)** file that is being used by JetBrains products, namely **[ReSharper](https://www.jetbrains.com/resharper)** and **[Rider](https://www.jetbrains.com/rider)**. This one is the most complete config file that is also being loaded automatically when you're using ReSharper/Rider with our code.
 
-Personally we're using **[JetBrains Rider](https://www.jetbrains.com/rider)**, so no other action is needed after opening `ArchiSteamFarm.sln` solution. If you're using VS alone, it's probably a good idea to import our code style settings, although even editor config should be enough for majority of cases. If you can save us those few extra seconds cleaning up your code after accepting it, it would be great and surely improve overall code history.
+Since above files are used automatically, in vast majority of cases, you may just need to run some cleanup operation on files that you've edited, assuming your IDE doesn't do that automatically. If you can save us those few extra seconds cleaning up your code after accepting it, it would be great and surely improve overall code history.

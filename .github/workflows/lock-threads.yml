@@ -3,14 +3,23 @@ name: ASF-lock-threads
 on:
   schedule:
     - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  discussions: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: lock-threads
 
 jobs:
   lock:
     runs-on: ubuntu-latest
     steps:
       - name: Lock inactive threads
-        uses: dessant/lock-threads@v2.0.3
+        uses: dessant/lock-threads@89ae32b08ed1a541efecbab17912962a5e38981c # v6.0.2
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-lock-inactive-days: 30
-          pr-lock-inactive-days: 30
+          discussion-inactive-days: 90
+          issue-inactive-days: 60
+          pr-inactive-days: 60

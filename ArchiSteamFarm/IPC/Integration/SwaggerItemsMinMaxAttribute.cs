@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,41 +22,40 @@
 // limitations under the License.
 
 using System;
+using System.Globalization;
 using JetBrains.Annotations;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 
-namespace ArchiSteamFarm.IPC.Integration {
-	[PublicAPI]
-	public sealed class SwaggerItemsMinMaxAttribute : CustomSwaggerAttribute {
-		public uint MaximumUint {
-			get => BackingMaximum.HasValue ? decimal.ToUInt32(BackingMaximum.Value) : default(uint);
-			set => BackingMaximum = value;
+namespace ArchiSteamFarm.IPC.Integration;
+
+[PublicAPI]
+public sealed class SwaggerItemsMinMaxAttribute : CustomSwaggerAttribute {
+	public uint MaximumUint {
+		get => BackingMaximum.HasValue ? decimal.ToUInt32(BackingMaximum.Value) : 0;
+		set => BackingMaximum = value;
+	}
+
+	public uint MinimumUint {
+		get => BackingMinimum.HasValue ? decimal.ToUInt32(BackingMinimum.Value) : 0;
+		set => BackingMinimum = value;
+	}
+
+	private decimal? BackingMaximum;
+	private decimal? BackingMinimum;
+
+	public override void Apply(OpenApiSchema schema) {
+		ArgumentNullException.ThrowIfNull(schema);
+
+		if (schema.Items is not OpenApiSchema items) {
+			throw new InvalidOperationException(nameof(schema.Items));
 		}
 
-		public uint MinimumUint {
-			get => BackingMinimum.HasValue ? decimal.ToUInt32(BackingMinimum.Value) : default(uint);
-			set => BackingMinimum = value;
+		if (BackingMinimum.HasValue) {
+			items.Minimum = BackingMinimum.Value.ToString(CultureInfo.InvariantCulture);
 		}
 
-		private decimal? BackingMaximum;
-		private decimal? BackingMinimum;
-
-		public override void Apply(OpenApiSchema schema) {
-			if (schema == null) {
-				throw new ArgumentNullException(nameof(schema));
-			}
-
-			if (schema.Items == null) {
-				throw new InvalidOperationException(nameof(schema.Items));
-			}
-
-			if (BackingMinimum.HasValue) {
-				schema.Items.Minimum = BackingMinimum.Value;
-			}
-
-			if (BackingMaximum.HasValue) {
-				schema.Items.Maximum = BackingMaximum.Value;
-			}
+		if (BackingMaximum.HasValue) {
+			items.Maximum = BackingMaximum.Value.ToString(CultureInfo.InvariantCulture);
 		}
 	}
 }

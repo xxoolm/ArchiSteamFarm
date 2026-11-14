@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,12 +23,12 @@
 
 using System;
 using JetBrains.Annotations;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 
-namespace ArchiSteamFarm.IPC.Integration {
-	[AttributeUsage(AttributeTargets.Field | AttributeTargets.Parameter | AttributeTargets.Property)]
-	[PublicAPI]
-	public abstract class CustomSwaggerAttribute : Attribute {
-		public abstract void Apply(OpenApiSchema schema);
-	}
+namespace ArchiSteamFarm.IPC.Integration;
+
+[AttributeUsage(AttributeTargets.Field | AttributeTargets.Parameter | AttributeTargets.Property)]
+[PublicAPI]
+public abstract class CustomSwaggerAttribute : Attribute {
+	public abstract void Apply(OpenApiSchema schema);
 }

@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,150 +22,173 @@
 // limitations under the License.
 
 using System;
+using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using ArchiSteamFarm.Compatibility;
 using ArchiSteamFarm.Core;
-using Newtonsoft.Json;
+using ArchiSteamFarm.Helpers.Json;
+using JetBrains.Annotations;
 
-namespace ArchiSteamFarm.Helpers {
-	public abstract class SerializableFile : IDisposable {
-		private static readonly SemaphoreSlim GlobalFileSemaphore = new(1, 1);
+namespace ArchiSteamFarm.Helpers;
 
-		private readonly SemaphoreSlim FileSemaphore = new(1, 1);
+public abstract class SerializableFile : IDisposable {
+	private static readonly SemaphoreSlim GlobalFileSemaphore = new(1, 1);
 
-		protected string? FilePath { get; set; }
+	private readonly SemaphoreSlim FileSemaphore = new(1, 1);
 
-		private bool ReadOnly;
-		private bool SavingScheduled;
+	protected string? FilePath { get; set; }
 
-		public void Dispose() {
-			Dispose(true);
-			GC.SuppressFinalize(this);
+	private bool ReadOnly;
+	private bool SavingScheduled;
+
+	public void Dispose() {
+		Dispose(true);
+		GC.SuppressFinalize(this);
+	}
+
+	protected virtual void Dispose(bool disposing) {
+		if (disposing) {
+			FileSemaphore.Dispose();
+		}
+	}
+
+	/// <summary>
+	///     Implementing this method in your target class is crucial for providing supported functionality.
+	///     In order to do so, it's enough to call static <see cref="Save" /> function from the parent class, providing <code>this</code> as input parameter.
+	///     Afterwards, simply call your <see cref="Save" /> function whenever you need to save changes.
+	///     This approach will allow JSON serializer used in the <see cref="SerializableFile" /> to properly discover all of the properties used in your class.
+	///     Unfortunately, due to STJ's limitations, called by some "security", it's not possible for base class to resolve your properties automatically otherwise.
+	/// </summary>
+	/// <example>protected override Task Save(CancellationToken cancellationToken = default) => Save(this, cancellationToken);</example>
+	[UsedImplicitly]
+	protected abstract Task Save(CancellationToken cancellationToken = default);
+
+	protected static async Task Save<T>(T serializableFile, CancellationToken cancellationToken = default) where T : SerializableFile {
+		ArgumentNullException.ThrowIfNull(serializableFile);
+
+		if (string.IsNullOrEmpty(serializableFile.FilePath)) {
+			return;
 		}
 
-		protected virtual void Dispose(bool disposing) {
-			if (disposing) {
-				FileSemaphore.Dispose();
-			}
+		if (serializableFile.ReadOnly) {
+			return;
 		}
 
-		protected async Task Save() {
-			if (string.IsNullOrEmpty(FilePath)) {
-				throw new InvalidOperationException(nameof(FilePath));
-			}
-
-			if (ReadOnly) {
+		// ReSharper disable once SuspiciousLockOverSynchronizationPrimitive - this is not a mistake, we need extra synchronization, and we can re-use the semaphore object for that
+		lock (serializableFile.FileSemaphore) {
+			if (serializableFile.SavingScheduled) {
 				return;
 			}
 
-			lock (FileSemaphore) {
-				if (SavingScheduled) {
-					return;
-				}
-
-				SavingScheduled = true;
-			}
-
-			await FileSemaphore.WaitAsync().ConfigureAwait(false);
-
-			try {
-				lock (FileSemaphore) {
-					SavingScheduled = false;
-				}
-
-				if (ReadOnly) {
-					return;
-				}
-
-				string json = JsonConvert.SerializeObject(this, Debugging.IsUserDebugging ? Formatting.Indented : Formatting.None);
-
-				if (string.IsNullOrEmpty(json)) {
-					throw new InvalidOperationException(nameof(json));
-				}
-
-				// We always want to write entire content to temporary file first, in order to never load corrupted data, also when target file doesn't exist
-				string newFilePath = FilePath + ".new";
-
-				if (System.IO.File.Exists(FilePath)) {
-					string currentJson = await File.ReadAllTextAsync(FilePath!).ConfigureAwait(false);
-
-					if (json == currentJson) {
-						return;
-					}
-
-					await File.WriteAllTextAsync(newFilePath, json).ConfigureAwait(false);
-
-					System.IO.File.Replace(newFilePath, FilePath, null);
-				} else {
-					await File.WriteAllTextAsync(newFilePath, json).ConfigureAwait(false);
-
-					System.IO.File.Move(newFilePath, FilePath);
-				}
-			} catch (Exception e) {
-				ASF.ArchiLogger.LogGenericException(e);
-			} finally {
-				FileSemaphore.Release();
-			}
+			serializableFile.SavingScheduled = true;
 		}
 
-		internal async Task MakeReadOnly() {
-			if (ReadOnly) {
+		try {
+			await serializableFile.FileSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+		} catch {
+			// ReSharper disable once SuspiciousLockOverSynchronizationPrimitive - this is not a mistake, we need extra synchronization, and we can re-use the semaphore object for that
+			lock (serializableFile.FileSemaphore) {
+				serializableFile.SavingScheduled = false;
+			}
+
+			throw;
+		}
+
+		try {
+			// ReSharper disable once SuspiciousLockOverSynchronizationPrimitive - this is not a mistake, we need extra synchronization, and we can re-use the semaphore object for that
+			lock (serializableFile.FileSemaphore) {
+				serializableFile.SavingScheduled = false;
+			}
+
+			if (serializableFile.ReadOnly) {
 				return;
 			}
 
-			await FileSemaphore.WaitAsync().ConfigureAwait(false);
-
-			try {
-				if (ReadOnly) {
-					return;
-				}
-
-				ReadOnly = true;
-			} finally {
-				FileSemaphore.Release();
-			}
-		}
-
-		internal static async Task<bool> Write(string filePath, string json) {
-			if (string.IsNullOrEmpty(filePath)) {
-				throw new ArgumentNullException(nameof(filePath));
-			}
+			string json = serializableFile.ToJsonText(Debugging.IsUserDebugging);
 
 			if (string.IsNullOrEmpty(json)) {
-				throw new ArgumentNullException(nameof(json));
+				throw new InvalidOperationException(nameof(json));
 			}
 
-			string newFilePath = filePath + ".new";
-
-			await GlobalFileSemaphore.WaitAsync().ConfigureAwait(false);
-
-			try {
-				// We always want to write entire content to temporary file first, in order to never load corrupted data, also when target file doesn't exist
-				if (System.IO.File.Exists(filePath)) {
-					string currentJson = await File.ReadAllTextAsync(filePath).ConfigureAwait(false);
-
-					if (json == currentJson) {
-						return true;
-					}
-
-					await File.WriteAllTextAsync(newFilePath, json).ConfigureAwait(false);
-
-					System.IO.File.Replace(newFilePath, filePath, null);
-				} else {
-					await File.WriteAllTextAsync(newFilePath, json).ConfigureAwait(false);
-
-					System.IO.File.Move(newFilePath, filePath);
-				}
-
-				return true;
-			} catch (Exception e) {
-				ASF.ArchiLogger.LogGenericException(e);
-
-				return false;
-			} finally {
-				GlobalFileSemaphore.Release();
-			}
+			await WriteContentSafely(serializableFile.FilePath, json, cancellationToken).ConfigureAwait(false);
+		} catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
+			throw;
+		} catch (Exception e) {
+			ASF.ArchiLogger.LogGenericException(e);
+		} finally {
+			serializableFile.FileSemaphore.Release();
 		}
+	}
+
+	internal async Task MakeReadOnly(CancellationToken cancellationToken = default) {
+		if (ReadOnly) {
+			return;
+		}
+
+		await FileSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		try {
+			if (ReadOnly) {
+				return;
+			}
+
+			ReadOnly = true;
+		} finally {
+			FileSemaphore.Release();
+		}
+	}
+
+	internal static async Task<bool> Write(string filePath, string json, CancellationToken cancellationToken = default) {
+		ArgumentException.ThrowIfNullOrEmpty(filePath);
+		ArgumentException.ThrowIfNullOrEmpty(json);
+
+		await GlobalFileSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		try {
+			await WriteContentSafely(filePath, json, cancellationToken).ConfigureAwait(false);
+
+			return true;
+		} catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
+			throw;
+		} catch (Exception e) {
+			ASF.ArchiLogger.LogGenericException(e);
+
+			return false;
+		} finally {
+			GlobalFileSemaphore.Release();
+		}
+	}
+
+	private static async Task WriteContentSafely(string filePath, string json, CancellationToken cancellationToken = default) {
+		ArgumentException.ThrowIfNullOrEmpty(filePath);
+		ArgumentException.ThrowIfNullOrEmpty(json);
+
+		// We always want to write entire content to temporary file first, in order to never load corrupted data, also when target file doesn't exist
+		string newFilePath = $"{filePath}.new";
+
+		FileStream fileStream = new(
+			newFilePath, new FileStreamOptions {
+				Access = FileAccess.Write,
+				Mode = FileMode.Create,
+				Options = FileOptions.Asynchronous,
+				Share = FileShare.None
+			}
+		);
+
+		await using (fileStream.ConfigureAwait(false)) {
+			StreamWriter streamWriter = new(fileStream, new UTF8Encoding(false), leaveOpen: true);
+
+			await using (streamWriter.ConfigureAwait(false)) {
+				await streamWriter.WriteAsync(json, cancellationToken).ConfigureAwait(false);
+				await streamWriter.FlushAsync(cancellationToken).ConfigureAwait(false);
+			}
+
+#pragma warning disable CA1849 // Asynchronous variant does not allow flushing OS buffers, so we need to use synchronous variant here
+			fileStream.Flush(true);
+#pragma warning restore CA1849 // Asynchronous variant does not allow flushing OS buffers, so we need to use synchronous variant here
+		}
+
+		File.Move(newFilePath, filePath, true);
 	}
 }

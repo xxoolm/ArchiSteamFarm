@@ -1,48 +1,41 @@
 name: ASF-ci
 
-on: [push, pull_request]
+on: [pull_request, push, workflow_dispatch]
 
 env:
-  CONFIGURATION: Release
-  DOTNET_CLI_TELEMETRY_OPTOUT: 1
-  DOTNET_NOLOGO: 1
-  DOTNET_SDK_VERSION: 5.0.x
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  DOTNET_SDK_VERSION: 11.0
+
+permissions: {}
 
 jobs:
   main:
     strategy:
       fail-fast: false
       matrix:
+        configuration: [Debug, Release]
         os: [macos-latest, ubuntu-latest, windows-latest]
 
     runs-on: ${{ matrix.os }}
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2.3.4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        show-progress: false
         submodules: recursive
 
     - name: Setup .NET Core
-      uses: actions/setup-dotnet@v1.8.1
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
       with:
         dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
 
     - name: Verify .NET Core
       run: dotnet --info
 
-    - name: Build ArchiSteamFarm and other projects
-      run: dotnet build -c "${{ env.CONFIGURATION }}" -p:ContinuousIntegrationBuild=true -p:UseAppHost=false --nologo
+    - name: Build ${{ matrix.configuration }} ArchiSteamFarm and other projects
+      run: dotnet build -c "${{ matrix.configuration }}" -p:ContinuousIntegrationBuild=true -p:UseAppHost=false --nologo
 
-    - name: Run ArchiSteamFarm.Tests
-      run: dotnet test ArchiSteamFarm.Tests -c "${{ env.CONFIGURATION }}" -p:ContinuousIntegrationBuild=true -p:UseAppHost=false --nologo
-
-    - name: Upload latest strings for translation on Crowdin
-      continue-on-error: true
-      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(matrix.os, 'ubuntu-') }}
-      uses: crowdin/github-action@1.1.0
-      with:
-        crowdin_branch_name: main
-        config: '.github/crowdin.yml'
-        project_id: ${{ secrets.ASF_CROWDIN_PROJECT_ID }}
-        token: ${{ secrets.ASF_CROWDIN_API_TOKEN }}
+    - name: Run ${{ matrix.configuration }} ArchiSteamFarm.Tests
+      run: dotnet test ArchiSteamFarm.Tests -c "${{ matrix.configuration }}" -p:ContinuousIntegrationBuild=true -p:UseAppHost=false --filter TestCategory!=Manual --nologo

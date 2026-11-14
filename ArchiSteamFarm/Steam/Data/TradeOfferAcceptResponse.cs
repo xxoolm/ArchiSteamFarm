@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,18 +22,20 @@
 // limitations under the License.
 
 using System.Diagnostics.CodeAnalysis;
-using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
-namespace ArchiSteamFarm.Steam.Data {
-	[SuppressMessage("ReSharper", "ClassCannotBeInstantiated")]
-	internal sealed class TradeOfferAcceptResponse {
-		[JsonProperty(PropertyName = "strError", Required = Required.DisallowNull)]
-		internal readonly string ErrorText = "";
+namespace ArchiSteamFarm.Steam.Data;
 
-		[JsonProperty(PropertyName = "needs_mobile_confirmation", Required = Required.DisallowNull)]
-		internal readonly bool RequiresMobileConfirmation;
+[SuppressMessage("ReSharper", "ClassCannotBeInstantiated")]
+internal sealed class TradeOfferAcceptResponse {
+	[JsonInclude]
+	[JsonPropertyName("strError")]
+	internal string? ErrorText { get; private init; }
 
-		[JsonConstructor]
-		private TradeOfferAcceptResponse() { }
-	}
+	[JsonInclude]
+	[JsonPropertyName("needs_mobile_confirmation")]
+	internal bool RequiresMobileConfirmation { get; private init; }
+
+	[JsonConstructor]
+	private TradeOfferAcceptResponse() { }
 }

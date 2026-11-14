@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,16 +21,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#if NETFRAMEWORK
-using ArchiSteamFarm.Compatibility;
-using File = System.IO.File;
-#endif
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Globalization;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -36,258 +37,379 @@ using System.Threading.Tasks;
 using ArchiSteamFarm.Localization;
 using ArchiSteamFarm.Storage;
 using ArchiSteamFarm.Web;
+using Microsoft.Win32.SafeHandles;
+using Tmds.DBus.Protocol;
 
-namespace ArchiSteamFarm.Core {
-	internal static class OS {
-		// We need to keep this one assigned and not calculated on-demand
-		internal static readonly string ProcessFileName = Process.GetCurrentProcess().MainModule?.FileName ?? throw new InvalidOperationException(nameof(ProcessFileName));
+namespace ArchiSteamFarm.Core;
 
-		internal static string Variant => RuntimeInformation.OSArchitecture + " " + RuntimeInformation.OSDescription.Trim();
+internal static class OS {
+	// We need to keep this one assigned and not calculated on-demand
+	internal static readonly string ProcessFileName = Environment.ProcessPath ?? throw new InvalidOperationException(nameof(ProcessFileName));
 
-		private static Mutex? SingleInstance;
+	internal static string? Description => TrimAndNullifyEmptyText(RuntimeInformation.OSDescription);
+	internal static string? Framework => TrimAndNullifyEmptyText(RuntimeInformation.FrameworkDescription);
 
-		internal static void CoreInit(bool systemRequired) {
-			if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
-				if (systemRequired) {
-					WindowsKeepSystemActive();
-				}
+	internal static DateTime ProcessStartTime {
+		get {
+			using Process process = Process.GetCurrentProcess();
 
-				if (!Console.IsOutputRedirected) {
-					// Normally we should use UTF-8 encoding as it's the most correct one for our case, and we already use it on other OSes such as Linux
-					// However, older Windows versions, mainly 7/8.1 can't into UTF-8 without appropriate console font, and expecting from users to change it manually is unwanted
-					// As irrational as it can sound, those versions actually can work with unicode encoding instead, as they magically map it into proper chars despite of incorrect font
-					// We could in theory conditionally use UTF-8 for Windows 10+ and unicode otherwise, but Windows version detection is simply not worth the hassle in this case
-					// Therefore, until we can drop support for Windows < 10, we'll stick with Unicode for all Windows boxes, unless there will be valid reasoning for conditional switch
-					// See https://github.com/JustArchiNET/ArchiSteamFarm/issues/1289 for more details
-					Console.OutputEncoding = Encoding.Unicode;
+			return process.StartTime.ToUniversalTime();
+		}
+	}
 
-					// Quick edit mode will freeze when user start selecting something on the console until the selection is cancelled
-					// Users are very often doing it accidentally without any real purpose, and we want to avoid this common issue which causes the whole process to hang
-					// See http://stackoverflow.com/questions/30418886/how-and-why-does-quickedit-mode-in-command-prompt-freeze-applications for more details
-					WindowsDisableQuickEditMode();
-				}
+	internal static string? Runtime => TrimAndNullifyEmptyText(RuntimeInformation.RuntimeIdentifier);
+
+	[field: AllowNull]
+	[field: MaybeNull]
+	internal static string Version {
+		get {
+			if (!string.IsNullOrEmpty(field)) {
+				return field;
+			}
+
+			return field = $"{Framework ?? "Unknown Framework"}; {Runtime ?? "Unknown Runtime"}; {Description ?? "Unknown OS"}";
+		}
+	}
+
+	private static SafeHandle? InhibitLock;
+	private static Mutex? SingleInstance;
+
+	internal static async Task CoreInit(bool minimized, bool systemRequired) {
+		if (minimized) {
+			MinimizeConsoleWindow();
+		}
+
+		if (OperatingSystem.IsLinux()) {
+			if (systemRequired) {
+				await LinuxKeepSystemActive().ConfigureAwait(false);
 			}
 		}
 
-		internal static string GetOsResourceName(string objectName) {
-			if (string.IsNullOrEmpty(objectName)) {
-				throw new ArgumentNullException(nameof(objectName));
+		if (OperatingSystem.IsWindows()) {
+			if (systemRequired) {
+				WindowsKeepSystemActive();
 			}
 
-			return SharedInfo.AssemblyName + "-" + objectName;
-		}
+			if (!Console.IsOutputRedirected) {
+				// Normally we should use UTF-8 console encoding as it's the most correct one for our case, and we already use it on other OSes such as Linux
+				// However, older Windows versions, mainly 7/8.1 can't into UTF-8 without appropriate console font, and expecting from users to change it manually is unwanted
+				// As irrational as it can sound, those versions actually can work with unicode encoding instead, as they magically map it into proper chars despite of incorrect font
+				// See https://github.com/JustArchiNET/ArchiSteamFarm/issues/1289 for more details
+				Console.OutputEncoding = OperatingSystem.IsWindowsVersionAtLeast(10) ? Encoding.UTF8 : Encoding.Unicode;
 
-		internal static void Init(GlobalConfig.EOptimizationMode optimizationMode) {
-			if (!Enum.IsDefined(typeof(GlobalConfig.EOptimizationMode), optimizationMode)) {
-				throw new ArgumentNullException(nameof(optimizationMode));
-			}
-
-			switch (optimizationMode) {
-				case GlobalConfig.EOptimizationMode.MaxPerformance:
-					// No specific tuning required for now, ASF is optimized for max performance by default
-					break;
-				case GlobalConfig.EOptimizationMode.MinMemoryUsage:
-					// We can disable regex cache which will slightly lower memory usage (for a huge performance hit)
-					Regex.CacheSize = 0;
-
-					break;
-				default:
-					throw new ArgumentOutOfRangeException(nameof(optimizationMode));
+				// Quick edit mode will freeze when user start selecting something on the console until the selection is cancelled
+				// Users are very often doing it accidentally without any real purpose, and we want to avoid this common issue which causes the whole process to hang
+				// See http://stackoverflow.com/questions/30418886/how-and-why-does-quickedit-mode-in-command-prompt-freeze-applications for more details
+				WindowsDisableQuickEditMode();
 			}
 		}
+	}
 
-		internal static async Task<bool> RegisterProcess() {
-			if (SingleInstance != null) {
-				return false;
-			}
+	internal static string GetOsResourceName(string objectName) {
+		ArgumentException.ThrowIfNullOrEmpty(objectName);
 
-			string uniqueName;
+		return $"{SharedInfo.AssemblyName}-{objectName}";
+	}
 
-			// The only purpose of using hashingAlgorithm here is to cut on a potential size of the resource name - paths can be really long, and we almost certainly have some upper limit on the resource name we can allocate
-			// At the same time it'd be the best if we avoided all special characters, such as '/' found e.g. in base64, as we can't be sure that it's not a prohibited character in regards to native OS implementation
-			// Because of that, SHA256 is sufficient for our case, as it generates alphanumeric characters only, and is barely 256-bit long. We don't need any kind of complex cryptography or collision detection here, any hashing algorithm will do, and the shorter the better
-			using (SHA256 hashingAlgorithm = SHA256.Create()) {
-				uniqueName = "Global\\" + GetOsResourceName(nameof(SingleInstance)) + "-" + BitConverter.ToString(hashingAlgorithm.ComputeHash(Encoding.UTF8.GetBytes(Directory.GetCurrentDirectory()))).Replace("-", "", StringComparison.Ordinal);
-			}
-
-			Mutex? singleInstance = null;
-
-			for (byte i = 0; i < WebBrowser.MaxTries; i++) {
-				if (i > 0) {
-					await Task.Delay(1000).ConfigureAwait(false);
-				}
-
-				singleInstance = new Mutex(true, uniqueName, out bool result);
-
-				if (result) {
-					break;
-				}
-
-				singleInstance.Dispose();
-				singleInstance = null;
-			}
-
-			if (singleInstance == null) {
-				return false;
-			}
-
-			SingleInstance = singleInstance;
-
-			return true;
+	internal static void Init(EOptimizationMode optimizationMode) {
+		if (!Enum.IsDefined(optimizationMode)) {
+			throw new InvalidEnumArgumentException(nameof(optimizationMode), (int) optimizationMode, typeof(EOptimizationMode));
 		}
 
-		internal static void UnixSetFileAccess(string path, EUnixPermission permission) {
-			if (string.IsNullOrEmpty(path)) {
-				throw new ArgumentNullException(nameof(path));
-			}
+		switch (optimizationMode) {
+			case EOptimizationMode.MaxPerformance:
+				// No specific tuning required for now, ASF is optimized for max performance by default
+				break;
+			case EOptimizationMode.MinMemoryUsage:
+				// We can disable regex cache which will slightly lower memory usage (for a huge performance hit)
+				Regex.CacheSize = 0;
 
-#if NETFRAMEWORK
-			if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && !RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) {
-#else
-			if (!RuntimeInformation.IsOSPlatform(OSPlatform.FreeBSD) && !RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && !RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) {
-#endif
-				throw new PlatformNotSupportedException();
-			}
+				break;
+			default:
+				throw new InvalidOperationException(nameof(optimizationMode));
+		}
+	}
 
-			if (!File.Exists(path) && !Directory.Exists(path)) {
-				ASF.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningFailedWithError, "!" + nameof(path)));
+	internal static bool IsRunningAsRoot() {
+		if (OperatingSystem.IsWindows()) {
+			using WindowsIdentity identity = WindowsIdentity.GetCurrent();
 
-				return;
-			}
-
-			// Chmod() returns 0 on success, -1 on failure
-			if (NativeMethods.Chmod(path, (int) permission) != 0) {
-				ASF.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningFailedWithError, Marshal.GetLastWin32Error()));
-			}
+			return identity.IsSystem || new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
 		}
 
-		internal static void UnregisterProcess() {
-			if (SingleInstance == null) {
-				return;
+		if (OperatingSystem.IsFreeBSD() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) {
+			return NativeMethods.GetEuid() == 0;
+		}
+
+		// We can't determine whether user is running as root or not, so fallback to that not happening
+		return false;
+	}
+
+	internal static async Task<bool> RegisterProcess(CancellationToken cancellationToken = default) {
+		if (SingleInstance != null) {
+			return false;
+		}
+
+		// The only purpose of using hashing here is to cut on a potential size of the resource name - paths can be really long, and we almost certainly have some upper limit on the resource name we can allocate
+		// At the same time it'd be the best if we avoided all special characters, such as '/' found e.g. in base64, as we can't be sure that it's not a prohibited character in regards to native OS implementation
+		// Because of that, SHA256 is sufficient for our case, as it generates alphanumeric characters only, and is barely 256-bit long. We don't need any kind of complex cryptography or collision detection here, any hashing will do, and the shorter the better
+		string uniqueName = $"Global\\{GetOsResourceName(nameof(SingleInstance))}-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Directory.GetCurrentDirectory())))}";
+
+		Mutex? singleInstance = null;
+
+		for (byte i = 0; i < WebBrowser.MaxTries; i++) {
+			if (i > 0) {
+				await Task.Delay(2000, cancellationToken).ConfigureAwait(false);
 			}
 
-			// We should release the mutex here, but that can be done only from the same thread due to thread affinity
-			// Instead, we'll dispose the mutex which should automatically release it by the CLR
+			singleInstance = new Mutex(true, uniqueName, new NamedWaitHandleOptions { CurrentSessionOnly = false, CurrentUserOnly = false }, out bool result);
+
+			if (result) {
+				break;
+			}
+
+			singleInstance.Dispose();
+			singleInstance = null;
+		}
+
+		if (singleInstance == null) {
+			return false;
+		}
+
+		SingleInstance = singleInstance;
+
+		return true;
+	}
+
+	internal static void UnregisterProcess() {
+		// We should release the mutex here, but that can be done only from the same thread due to thread affinity
+		// Instead, we'll dispose the mutex which should automatically release it by the CLR
+		if (SingleInstance != null) {
 			SingleInstance.Dispose();
 			SingleInstance = null;
 		}
 
-		internal static bool VerifyEnvironment() {
-#if NETFRAMEWORK
-			// This is .NET Framework build, we support that one only on mono for platforms not supported by .NET Core
+		// Release the inhibit lock as well, if needed
+		if (InhibitLock != null) {
+			InhibitLock.Dispose();
+			InhibitLock = null;
+		}
+	}
 
-			// We're not going to analyze source builds, as we don't know what changes the author has made, assume they have a point
-			if (SharedInfo.BuildInfo.IsCustomBuild) {
-				return true;
-			}
-
-			// All windows variants have valid .NET Core build, and generic-netf is supported only on mono
-			if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || !StaticHelpers.IsRunningOnMono) {
-				return false;
-			}
-
-			return RuntimeInformation.OSArchitecture switch {
-				// Sadly we can't tell a difference between ARMv6 and ARMv7 reliably, we'll believe that this linux-arm user knows what he's doing and he's indeed in need of generic-netf on ARMv6
-				Architecture.Arm => true,
-
-				// Apart from real x86, this also covers all unknown architectures, such as sparc, ppc64, and anything else Mono might support, we're fine with that
-				Architecture.X86 => true,
-
-				// Everything else is covered by .NET Core
-				_ => false
-			};
-#else
-
-			// This is .NET Core build, we support all scenarios
+	internal static bool VerifyEnvironment() {
+		// We're not going to analyze source builds, as we don't know what changes the author has made, assume they have a point
+		if (BuildInfo.IsCustomBuild) {
 			return true;
-#endif
 		}
 
-		private static void WindowsDisableQuickEditMode() {
-			if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
-				throw new PlatformNotSupportedException();
-			}
-
-			IntPtr consoleHandle = NativeMethods.GetStdHandle(NativeMethods.StandardInputHandle);
-
-			if (!NativeMethods.GetConsoleMode(consoleHandle, out uint consoleMode)) {
-				ASF.ArchiLogger.LogGenericError(Strings.WarningFailed);
-
-				return;
-			}
-
-			consoleMode &= ~NativeMethods.EnableQuickEditMode;
-
-			if (!NativeMethods.SetConsoleMode(consoleHandle, consoleMode)) {
-				ASF.ArchiLogger.LogGenericError(Strings.WarningFailed);
-			}
+		if (BuildInfo.Variant == "generic") {
+			// Generic is supported everywhere
+			return true;
 		}
 
-		private static void WindowsKeepSystemActive() {
-			if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
-				throw new PlatformNotSupportedException();
-			}
-
-			// This function calls unmanaged API in order to tell Windows OS that it should not enter sleep state while the program is running
-			// If user wishes to enter sleep mode, then he should use ShutdownOnFarmingFinished or manage ASF process with third-party tool or script
-			// See https://docs.microsoft.com/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate for more details
-			NativeMethods.EExecutionState result = NativeMethods.SetThreadExecutionState(NativeMethods.AwakeExecutionState);
-
-			// SetThreadExecutionState() returns NULL on failure, which is mapped to 0 (EExecutionState.None) in our case
-			if (result == NativeMethods.EExecutionState.None) {
-				ASF.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningFailedWithError, result));
-			}
+		if ((BuildInfo.Variant == "docker") || BuildInfo.Variant.StartsWith("linux-", StringComparison.Ordinal)) {
+			// OS-specific Linux and Docker builds are supported only on Linux
+			return OperatingSystem.IsLinux();
 		}
 
-		[Flags]
-		internal enum EUnixPermission : ushort {
-			OtherExecute = 0x1,
-			OtherWrite = 0x2,
-			OtherRead = 0x4,
-			GroupExecute = 0x8,
-			GroupWrite = 0x10,
-			GroupRead = 0x20,
-			UserExecute = 0x40,
-			UserWrite = 0x80,
-			UserRead = 0x100,
-			Combined755 = UserRead | UserWrite | UserExecute | GroupRead | GroupExecute | OtherRead | OtherExecute,
-			Combined777 = UserRead | UserWrite | UserExecute | GroupRead | GroupWrite | GroupExecute | OtherRead | OtherWrite | OtherExecute
+		if (BuildInfo.Variant.StartsWith("osx-", StringComparison.Ordinal)) {
+			// OS-specific macOS build is supported only on macOS
+			return OperatingSystem.IsMacOS();
 		}
 
-		private static class NativeMethods {
-			internal const EExecutionState AwakeExecutionState = EExecutionState.SystemRequired | EExecutionState.AwayModeRequired | EExecutionState.Continuous;
-			internal const uint EnableQuickEditMode = 0x0040;
-			internal const sbyte StandardInputHandle = -10;
+		if (BuildInfo.Variant.StartsWith("win-", StringComparison.Ordinal)) {
+			// OS-specific Windows build is supported only on Windows
+			return OperatingSystem.IsWindows();
+		}
 
-#pragma warning disable CA2101 // False positive, we can't use unicode charset on Unix, and it uses UTF-8 by default anyway
-			[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-			[DllImport("libc", EntryPoint = "chmod", SetLastError = true)]
-			internal static extern int Chmod(string path, int mode);
-#pragma warning restore CA2101 // False positive, we can't use unicode charset on Unix, and it uses UTF-8 by default anyway
+		// Unknown combination, we intend to cover all of the available ones above, so this results in an error
+		ASF.ArchiLogger.LogGenericError(Strings.FormatWarningUnknownValuePleaseReport(nameof(BuildInfo.Variant), BuildInfo.Variant));
 
-			[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-			[DllImport("kernel32.dll")]
-			internal static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+		return false;
+	}
 
-			[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-			[DllImport("kernel32.dll")]
-			internal static extern IntPtr GetStdHandle(int nStdHandle);
+	[SupportedOSPlatform("Windows")]
+	internal static void WindowsStartFlashingConsoleWindow() {
+		if (!OperatingSystem.IsWindows()) {
+			throw new PlatformNotSupportedException();
+		}
 
-			[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-			[DllImport("kernel32.dll")]
-			internal static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+		using Process currentProcess = Process.GetCurrentProcess();
 
-			[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
-			[DllImport("kernel32.dll")]
-			internal static extern EExecutionState SetThreadExecutionState(EExecutionState executionState);
+		nint handle = currentProcess.MainWindowHandle;
 
-			[Flags]
-			internal enum EExecutionState : uint {
-				None = 0,
-				SystemRequired = 0x00000001,
-				AwayModeRequired = 0x00000040,
-				Continuous = 0x80000000
+		if (handle == nint.Zero) {
+			return;
+		}
+
+		NativeMethods.FlashWindowInfo flashInfo = new() {
+			StructSize = (uint) Marshal.SizeOf<NativeMethods.FlashWindowInfo>(),
+			Flags = NativeMethods.EFlashFlags.All | NativeMethods.EFlashFlags.Timer,
+			WindowHandle = handle,
+			Count = uint.MaxValue
+		};
+
+		NativeMethods.FlashWindowEx(ref flashInfo);
+	}
+
+	[SupportedOSPlatform("Windows")]
+	internal static void WindowsStopFlashingConsoleWindow() {
+		if (!OperatingSystem.IsWindows()) {
+			throw new PlatformNotSupportedException();
+		}
+
+		using Process currentProcess = Process.GetCurrentProcess();
+		nint handle = currentProcess.MainWindowHandle;
+
+		if (handle == nint.Zero) {
+			return;
+		}
+
+		NativeMethods.FlashWindowInfo flashInfo = new() {
+			StructSize = (uint) Marshal.SizeOf<NativeMethods.FlashWindowInfo>(),
+			Flags = NativeMethods.EFlashFlags.Stop,
+			WindowHandle = handle
+		};
+
+		NativeMethods.FlashWindowEx(ref flashInfo);
+	}
+
+	[SupportedOSPlatform("Linux")]
+	private static async Task LinuxKeepSystemActive() {
+		if (!OperatingSystem.IsLinux()) {
+			throw new PlatformNotSupportedException();
+		}
+
+		// Docs: https://systemd.io/INHIBITOR_LOCKS
+		string? systemAddress = DBusAddress.System;
+
+		if (string.IsNullOrEmpty(systemAddress)) {
+			ASF.ArchiLogger.LogGenericError(Strings.FormatWarningFailedWithError(nameof(systemAddress)));
+
+			return;
+		}
+
+		using DBusConnection connection = new(systemAddress);
+
+		try {
+			await connection.ConnectAsync().ConfigureAwait(false);
+		} catch (DBusConnectionException e) {
+			// Possible if no DBus is available at all
+			ASF.ArchiLogger.LogGenericDebuggingException(e);
+			ASF.ArchiLogger.LogGenericWarning(Strings.WarningNoSystemRequiredLinuxDependencies);
+
+			return;
+		}
+
+		MessageWriter writer = connection.GetMessageWriter();
+
+		writer.WriteMethodCallHeader(
+			"org.freedesktop.login1",
+			"/org/freedesktop/login1",
+			"org.freedesktop.login1.Manager",
+			"Inhibit",
+			"ssss"
+		);
+
+		// Colon-separated list of lock types
+		writer.WriteString("sleep");
+
+		// Human-readable, descriptive string of who is taking the lock
+		writer.WriteString(SharedInfo.PublicIdentifier);
+
+		// Human-readable, descriptive string of why the lock is taken
+		writer.WriteString("--system-required");
+
+		// Mode
+		writer.WriteString("block");
+
+		MessageBuffer message = writer.CreateMessage();
+
+		try {
+			// Inhibit() returns a single value, a file descriptor that encapsulates the lock
+			InhibitLock = await connection.CallMethodAsync(
+				message, static (response, _) => {
+					Reader reader = response.GetBodyReader();
+
+					return reader.ReadHandle<SafeFileHandle>();
+				}
+			).ConfigureAwait(false);
+		} catch (DBusMessageException e) {
+			// Possible if login manager does not support inhibit, although that should be super rare
+			ASF.ArchiLogger.LogGenericDebuggingException(e);
+			ASF.ArchiLogger.LogGenericWarning(Strings.WarningNoSystemRequiredLinuxDependencies);
+		}
+	}
+
+	private static void MinimizeConsoleWindow() {
+		(_, int top) = Console.GetCursorPosition();
+
+		// Will work if the terminal supports XTWINOPS "iconify" escape sequence, reference: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+		Console.Write('\x1b' + @"[2;0;0t");
+
+		// Reset cursor position if terminal outputs escape sequences as-is
+		Console.SetCursorPosition(0, top);
+
+		// Fallback if we're using conhost on Windows
+		if (OperatingSystem.IsWindows()) {
+			using Process process = Process.GetCurrentProcess();
+
+			nint windowHandle = process.MainWindowHandle;
+
+			if (windowHandle != nint.Zero) {
+				NativeMethods.ShowWindow(windowHandle, NativeMethods.EShowWindow.Minimize);
 			}
+		}
+	}
+
+	private static string? TrimAndNullifyEmptyText(string text) {
+		ArgumentNullException.ThrowIfNull(text);
+
+		text = text.Trim();
+
+		return text.Length > 0 ? text : null;
+	}
+
+	[SupportedOSPlatform("Windows")]
+	private static void WindowsDisableQuickEditMode() {
+		if (!OperatingSystem.IsWindows()) {
+			throw new PlatformNotSupportedException();
+		}
+
+		nint consoleHandle = NativeMethods.GetStdHandle(NativeMethods.EStandardHandle.Input);
+
+		if (!NativeMethods.GetConsoleMode(consoleHandle, out NativeMethods.EConsoleMode consoleMode)) {
+			ASF.ArchiLogger.LogGenericError(Strings.WarningFailed);
+
+			return;
+		}
+
+		if (!consoleMode.HasFlag(NativeMethods.EConsoleMode.EnableQuickEditMode)) {
+			// Quick edit mode already disabled
+			return;
+		}
+
+		consoleMode &= ~NativeMethods.EConsoleMode.EnableQuickEditMode;
+
+		if (!NativeMethods.SetConsoleMode(consoleHandle, consoleMode)) {
+			ASF.ArchiLogger.LogGenericError(Strings.WarningFailed);
+		}
+	}
+
+	[SupportedOSPlatform("Windows")]
+	private static void WindowsKeepSystemActive() {
+		if (!OperatingSystem.IsWindows()) {
+			throw new PlatformNotSupportedException();
+		}
+
+		// This function calls unmanaged API in order to tell Windows OS that it should not enter sleep state while the program is running
+		// If user wishes to enter sleep mode, then they should use ShutdownOnFarmingFinished or manage the ASF process with third-party tool or script
+		// See https://docs.microsoft.com/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate for more details
+		NativeMethods.EExecutionState result = NativeMethods.SetThreadExecutionState(NativeMethods.EExecutionState.Awake);
+
+		// SetThreadExecutionState() returns NULL on failure, which is mapped to 0 (EExecutionState.None) in our case
+		if (result == NativeMethods.EExecutionState.None) {
+			ASF.ArchiLogger.LogGenericError(Strings.FormatWarningFailedWithError(result));
 		}
 	}
 }

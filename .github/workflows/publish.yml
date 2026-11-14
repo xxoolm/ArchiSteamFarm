@@ -1,44 +1,34 @@
 name: ASF-publish
 
-on: [push, pull_request]
+on: [pull_request, push, workflow_dispatch]
 
 env:
   CONFIGURATION: Release
-  DOTNET_CLI_TELEMETRY_OPTOUT: 1
-  DOTNET_NOLOGO: 1
-  DOTNET_SDK_VERSION: 5.0.x
-  NET_CORE_VERSION: net5.0
-  NET_FRAMEWORK_VERSION: net48
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+  DOTNET_SDK_VERSION: 11.0
   NODE_JS_VERSION: 'lts/*'
-  STEAM_TOKEN_DUMPER_NAME: ArchiSteamFarm.OfficialPlugins.SteamTokenDumper
-  STEAM_TOKEN_DUMPER_TOKEN: ${{ secrets.STEAM_TOKEN_DUMPER_TOKEN }}
+  PLUGINS_BUNDLED: ArchiSteamFarm.OfficialPlugins.ItemsMatcher ArchiSteamFarm.OfficialPlugins.MobileAuthenticator ArchiSteamFarm.OfficialPlugins.SteamTokenDumper
+  PLUGINS_INCLUDED: ArchiSteamFarm.OfficialPlugins.Monitoring # Apart from declaring them here, there is certain amount of hardcoding needed below for uploading
+
+permissions: {}
 
 jobs:
-  main:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
-
-    runs-on: ${{ matrix.os }}
+  publish-asf-ui:
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2.3.4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
+        show-progress: false
         submodules: recursive
 
-    - name: Setup .NET Core
-      uses: actions/setup-dotnet@v1.8.1
-      with:
-        dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
-
-    - name: Verify .NET Core
-      run: dotnet --info
-
     - name: Setup Node.js with npm
-      uses: actions/setup-node@v2.2.0
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
+        cache: npm
+        cache-dependency-path: ASF-ui/package-lock.json
         check-latest: true
         node-version: ${{ env.NODE_JS_VERSION }}
 
@@ -49,317 +39,513 @@ jobs:
       run: npm -v
 
     - name: Install npm modules for ASF-ui
-      run: npm ci --no-progress --prefix ASF-ui
+      run: npm ci --prefix ASF-ui --no-audit --no-fund --no-progress --prefer-offline
 
     - name: Publish ASF-ui
-      run: npm run-script deploy --no-progress --prefix ASF-ui
+      run: npm run-script deploy --prefix ASF-ui
 
-    - name: Prepare ArchiSteamFarm.OfficialPlugins.SteamTokenDumper on Unix
-      if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
-      shell: sh
-      run: |
-          if [ -n "${STEAM_TOKEN_DUMPER_TOKEN-}" ] && [ -f "${STEAM_TOKEN_DUMPER_NAME}/SharedInfo.cs" ]; then
-              sed "s/STEAM_TOKEN_DUMPER_TOKEN/${STEAM_TOKEN_DUMPER_TOKEN}/g" "${STEAM_TOKEN_DUMPER_NAME}/SharedInfo.cs" > "${STEAM_TOKEN_DUMPER_NAME}/SharedInfo.cs.new"
-              mv "${STEAM_TOKEN_DUMPER_NAME}/SharedInfo.cs.new" "${STEAM_TOKEN_DUMPER_NAME}/SharedInfo.cs"
-          fi
+    - name: Upload ASF-ui
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        compression-level: 1
+        if-no-files-found: error
+        name: ASF-ui
+        path: ASF-ui/dist
 
-    - name: Prepare ArchiSteamFarm.OfficialPlugins.SteamTokenDumper on Windows
-      if: startsWith(matrix.os, 'windows-')
-      shell: pwsh
-      run: |
-        Set-StrictMode -Version Latest
-        $ErrorActionPreference = 'Stop'
-        $ProgressPreference = 'SilentlyContinue'
+  publish-asf:
+    needs: publish-asf-ui
 
-        if ((Test-Path env:STEAM_TOKEN_DUMPER_TOKEN) -and (Test-Path "$env:STEAM_TOKEN_DUMPER_NAME\SharedInfo.cs" -PathType Leaf)) {
-            (Get-Content "$env:STEAM_TOKEN_DUMPER_NAME\SharedInfo.cs").Replace('STEAM_TOKEN_DUMPER_TOKEN', "$env:STEAM_TOKEN_DUMPER_TOKEN") | Set-Content "$env:STEAM_TOKEN_DUMPER_NAME\SharedInfo.cs"
-        }
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - os: ubuntu-latest
+          variant: generic
+        - os: ubuntu-latest
+          variant: linux-arm
+        - os: ubuntu-latest
+          variant: linux-arm64
+        - os: ubuntu-latest
+          variant: linux-x64
+        - os: macos-latest
+          variant: osx-arm64
+        - os: macos-latest
+          variant: osx-x64
+        - os: windows-latest
+          variant: win-arm64
+        - os: windows-latest
+          variant: win-x64
 
-    - name: Publish ArchiSteamFarm.OfficialPlugins.SteamTokenDumper for .NET Core
-      run: dotnet publish "${{ env.STEAM_TOKEN_DUMPER_NAME }}" -c "${{ env.CONFIGURATION }}" -f "${{ env.NET_CORE_VERSION }}" -o "out/${{ env.STEAM_TOKEN_DUMPER_NAME }}/${{ env.NET_CORE_VERSION }}" -p:ContinuousIntegrationBuild=true -p:TargetLatestRuntimePatch=false -p:UseAppHost=false --nologo
+    runs-on: ${{ matrix.os }}
 
-    - name: Publish ArchiSteamFarm.OfficialPlugins.SteamTokenDumper for .NET Framework
-      if: startsWith(matrix.os, 'windows-')
-      run: dotnet publish "${{ env.STEAM_TOKEN_DUMPER_NAME }}" -c "${{ env.CONFIGURATION }}" -f "${{ env.NET_FRAMEWORK_VERSION }}" -o "out/${{ env.STEAM_TOKEN_DUMPER_NAME }}/${{ env.NET_FRAMEWORK_VERSION }}" -p:ContinuousIntegrationBuild=true -p:TargetLatestRuntimePatch=false -p:UseAppHost=false --nologo
+    permissions:
+      attestations: write
+      id-token: write
 
-    - name: Restore packages in preparation for ArchiSteamFarm publishing
-      run: dotnet restore ArchiSteamFarm -p:ContinuousIntegrationBuild=true
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        show-progress: false
 
-    - name: Publish ArchiSteamFarm on Unix
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+      with:
+        dotnet-version: ${{ env.DOTNET_SDK_VERSION }}
+
+    - name: Verify .NET Core
+      run: dotnet --info
+
+    - name: Download previously built ASF-ui
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ASF-ui
+        path: ASF-ui/dist
+
+    - name: Prepare private key for signing on Unix
       if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
       env:
-        VARIANTS: generic linux-arm linux-arm64 linux-x64 osx-x64 win-x64 # NOTE: When modifying variants, don't forget to update ASF_VARIANT definitions in SharedInfo.cs!
+        ASF_PRIVATE_SNK: ${{ secrets.ASF_PRIVATE_SNK }}
       shell: sh
       run: |
         set -eu
 
-        publish() {
-            if [ "$1" = 'generic' ]; then
-                local variantArgs="-p:TargetLatestRuntimePatch=false -p:UseAppHost=false"
-            else
-                local variantArgs="-p:PublishSingleFile=true -p:PublishTrimmed=true -r $1"
-            fi
+        if [ -n "${ASF_PRIVATE_SNK-}" ]; then
+            echo "$ASF_PRIVATE_SNK" | base64 -d > "resources/ArchiSteamFarm.snk"
+        fi
 
-            dotnet publish ArchiSteamFarm -c "$CONFIGURATION" -f "$NET_CORE_VERSION" -o "out/${1}" "-p:ASFVariant=$1" -p:ContinuousIntegrationBuild=true --no-restore --nologo $variantArgs
-
-            # If we're including any overlay for this variant, copy it to output directory
-            if [ -d "ArchiSteamFarm/overlay/${1}" ]; then
-                cp -pR "ArchiSteamFarm/overlay/${1}/"* "out/${1}"
-            fi
-
-            # If we're including SteamTokenDumper plugin for this framework, copy it to output directory
-            if [ -d "out/${STEAM_TOKEN_DUMPER_NAME}/${NET_CORE_VERSION}" ]; then
-                mkdir -p "out/${1}/plugins/${STEAM_TOKEN_DUMPER_NAME}"
-                cp -pR "out/${STEAM_TOKEN_DUMPER_NAME}/${NET_CORE_VERSION}/"* "out/${1}/plugins/${STEAM_TOKEN_DUMPER_NAME}"
-            fi
-
-            # Include .ico file for all platforms, since only Windows script can bundle it inside the exe
-            cp "resources/ASF.ico" "out/${1}/ArchiSteamFarm.ico"
-
-            if command -v 7z >/dev/null; then
-                7z a -bd -slp -tzip -mm=Deflate -mx=1 "out/ASF-${1}.zip" "${GITHUB_WORKSPACE}/out/${1}/*"
-            elif command -v zip >/dev/null; then
-                (
-                    cd "${GITHUB_WORKSPACE}/out/${1}"
-                    zip -1 -q -r "../ASF-${1}.zip" .
-                )
-            else
-                echo "ERROR: No supported zip tool!"
-                return 1
-            fi
-        }
-
-        jobs=""
-
-        for variant in $VARIANTS; do
-            publish "$variant" &
-            jobs="$jobs $!"
-        done
-
-        for job in $jobs; do
-            wait "$job"
-        done
-
-    - name: Publish ArchiSteamFarm on Windows
+    - name: Prepare private key for signing on Windows
       if: startsWith(matrix.os, 'windows-')
       env:
-        VARIANTS: generic generic-netf linux-arm linux-arm64 linux-x64 osx-x64 win-x64 # NOTE: When modifying variants, don't forget to update ASF_VARIANT definitions in SharedInfo.cs!
+        ASF_PRIVATE_SNK: ${{ secrets.ASF_PRIVATE_SNK }}
       shell: pwsh
       run: |
         Set-StrictMode -Version Latest
         $ErrorActionPreference = 'Stop'
         $ProgressPreference = 'SilentlyContinue'
 
-        $PublishBlock = {
-            param($variant)
+        if ((Test-Path env:ASF_PRIVATE_SNK) -and ($env:ASF_PRIVATE_SNK)) {
+            echo "$env:ASF_PRIVATE_SNK" > "resources\ArchiSteamFarm.snk"
 
-            Set-StrictMode -Version Latest
-            $ErrorActionPreference = 'Stop'
-            $ProgressPreference = 'SilentlyContinue'
-
-            Set-Location "$env:GITHUB_WORKSPACE"
-
-            if ($variant -like '*-netf') {
-                $targetFramework = $env:NET_FRAMEWORK_VERSION
-            } else {
-                $targetFramework = $env:NET_CORE_VERSION
-            }
-
-            if ($variant -like 'generic*') {
-                $variantArgs = '-p:TargetLatestRuntimePatch=false', '-p:UseAppHost=false'
-            } else {
-                $variantArgs = '-p:PublishSingleFile=true', '-p:PublishTrimmed=true', '-r', "$variant"
-            }
-
-            dotnet publish ArchiSteamFarm -c "$env:CONFIGURATION" -f "$targetFramework" -o "out\$variant" "-p:ASFVariant=$variant" -p:ContinuousIntegrationBuild=true --no-restore --nologo $variantArgs
+            certutil -f -decode "resources\ArchiSteamFarm.snk" "resources\ArchiSteamFarm.snk"
 
             if ($LastExitCode -ne 0) {
                 throw "Last command failed."
             }
+        }
 
-            # If we're including any overlay for this variant, copy it to output directory
-            if (Test-Path "ArchiSteamFarm\overlay\$variant" -PathType Container) {
-                Copy-Item "ArchiSteamFarm\overlay\$variant\*" "out\$variant" -Recurse
-            }
+    - name: Prepare ArchiSteamFarm.OfficialPlugins.SteamTokenDumper on Unix
+      if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
+      env:
+        STEAM_TOKEN_DUMPER_TOKEN: ${{ secrets.STEAM_TOKEN_DUMPER_TOKEN }}
+      shell: sh
+      run: |
+        set -eu
 
-            # If we're including SteamTokenDumper plugin for this framework, copy it to output directory
-            if (Test-Path "out\$env:STEAM_TOKEN_DUMPER_NAME\$targetFramework" -PathType Container) {
-                if (!(Test-Path "out\$variant\plugins\$env:STEAM_TOKEN_DUMPER_NAME" -PathType Container)) {
-                    New-Item -ItemType Directory -Path "out\$variant\plugins\$env:STEAM_TOKEN_DUMPER_NAME" > $null
-                }
+        if [ -n "${STEAM_TOKEN_DUMPER_TOKEN-}" ] && [ -f "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper/SharedInfo.cs" ]; then
+            sed "s/STEAM_TOKEN_DUMPER_TOKEN/${STEAM_TOKEN_DUMPER_TOKEN}/g" "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper/SharedInfo.cs" > "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper/SharedInfo.cs.new"
+            mv "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper/SharedInfo.cs.new" "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper/SharedInfo.cs"
+        fi
 
-                Copy-Item "out\$env:STEAM_TOKEN_DUMPER_NAME\$targetFramework\*" "out\$variant\plugins\$env:STEAM_TOKEN_DUMPER_NAME" -Recurse
-            }
+    - name: Prepare ArchiSteamFarm.OfficialPlugins.SteamTokenDumper on Windows
+      if: startsWith(matrix.os, 'windows-')
+      env:
+        STEAM_TOKEN_DUMPER_TOKEN: ${{ secrets.STEAM_TOKEN_DUMPER_TOKEN }}
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
 
-            # Icon is available only in .NET Framework and .NET Core Windows build, we'll bundle the .ico file for other flavours
-            if (($targetFramework -eq "$env:NET_CORE_VERSION") -and !(Test-Path "out\$variant\ArchiSteamFarm.exe" -PathType Leaf)) {
-                Copy-Item 'resources\ASF.ico' "out\$variant\ArchiSteamFarm.ico"
-            }
+        if ((Test-Path env:STEAM_TOKEN_DUMPER_TOKEN) -and ($env:STEAM_TOKEN_DUMPER_TOKEN) -and (Test-Path "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper\SharedInfo.cs" -PathType Leaf)) {
+            (Get-Content "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper\SharedInfo.cs").Replace('STEAM_TOKEN_DUMPER_TOKEN', "$env:STEAM_TOKEN_DUMPER_TOKEN") | Set-Content "ArchiSteamFarm.OfficialPlugins.SteamTokenDumper\SharedInfo.cs"
+        }
 
-            # By default use fastest compression
-            $compressionArgs = '-mx=1'
+    - name: Publish ASF-${{ matrix.variant }} on Unix
+      if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: bash
+      run: |
+        set -euo pipefail
 
-            # Include extra logic for builds marked for release
-            if ($env:GITHUB_REF -like 'refs/tags/*') {
+        if [ "$VARIANT" = 'generic' ]; then
+            variantArgs="-p:TargetLatestRuntimePatch=false -p:UseAppHost=false"
+        else
+            variantArgs="-p:PublishSingleFile=true -p:PublishTrimmed=true -r $VARIANT --self-contained"
+        fi
+
+        dotnet publish ArchiSteamFarm -c "$CONFIGURATION" -o "out/${VARIANT}" "-p:ASFVariant=${VARIANT}" -p:ContinuousIntegrationBuild=true --nologo $variantArgs
+
+        # Include .ico file for all platforms, since only Windows script can bundle it inside the exe
+        cp "resources/ASF.ico" "out/${VARIANT}/ArchiSteamFarm.ico"
+
+        # Include extra logic for builds marked for release
+        case "$GITHUB_REF" in
+            "refs/tags/"*)
+                # Update link in Changelog.html accordingly
+                if [ -f "out/${VARIANT}/Changelog.html" ]; then
+                    tag="$(echo "$GITHUB_REF" | cut -c 11-)"
+
+                    sed "s/ArchiSteamFarm\/commits\/main/ArchiSteamFarm\/releases\/tag\/${tag}/g" "out/${VARIANT}/Changelog.html" > "out/${VARIANT}/Changelog.html.new"
+                    mv "out/${VARIANT}/Changelog.html.new" "out/${VARIANT}/Changelog.html"
+                fi
+                ;;
+        esac
+
+    - name: Publish ASF-${{ matrix.variant }} on Windows
+      if: startsWith(matrix.os, 'windows-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
+        if ($env:VARIANT -like 'generic*') {
+            $variantArgs = '-p:TargetLatestRuntimePatch=false', '-p:UseAppHost=false'
+        } else {
+            $variantArgs = '-p:PublishSingleFile=true', '-p:PublishTrimmed=true', '-r', "$env:VARIANT", '--self-contained'
+        }
+
+        dotnet publish ArchiSteamFarm -c "$env:CONFIGURATION" -o "out\$env:VARIANT" "-p:ASFVariant=$env:VARIANT" -p:ContinuousIntegrationBuild=true --nologo $variantArgs
+
+        if ($LastExitCode -ne 0) {
+            throw "Last command failed."
+        }
+
+        # Icon is available only in .exe Windows builds, we'll bundle the .ico file for other flavours
+        if (!(Test-Path "out\$env:VARIANT\ArchiSteamFarm.exe" -PathType Leaf)) {
+            Copy-Item 'resources\ASF.ico' "out\$env:VARIANT\ArchiSteamFarm.ico"
+        }
+
+        # Include extra logic for builds marked for release
+        if ($env:GITHUB_REF -like 'refs/tags/*') {
+            # Update link in Changelog.html accordingly
+            if (Test-Path "out\$env:VARIANT\Changelog.html" -PathType Leaf) {
                 $tag = $env:GITHUB_REF.Substring(10)
 
-                # Tweak compression args for release publishing
-                $compressionArgs = '-mx=9', '-mfb=258', '-mpass=15'
-
-                # Update link in Changelog.html accordingly
-                if (Test-Path "out\$variant\Changelog.html" -PathType Leaf) {
-                    (Get-Content "out\$variant\Changelog.html").Replace('ArchiSteamFarm/commits/main', "ArchiSteamFarm/releases/tag/$tag") | Set-Content "out\$variant\Changelog.html"
-                }
+                (Get-Content "out\$env:VARIANT\Changelog.html").Replace('ArchiSteamFarm/commits/main', "ArchiSteamFarm/releases/tag/$tag") | Set-Content "out\$env:VARIANT\Changelog.html"
             }
+        }
 
-            7z a -bd -slp -tzip -mm=Deflate $compressionArgs "out\ASF-$variant.zip" "$env:GITHUB_WORKSPACE\out\$variant\*"
+    - name: Publish bundled plugins on Unix
+      if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ "$VARIANT" = 'generic' ]; then
+            variantArgs="-p:TargetLatestRuntimePatch=false -p:UseAppHost=false"
+        else
+            variantArgs="-r $VARIANT"
+        fi
+
+        for plugin in $PLUGINS_BUNDLED; do
+            dotnet publish "$plugin" -c "$CONFIGURATION" -o "out/${VARIANT}/plugins/${plugin}" "-p:ASFVariant=${VARIANT}" -p:ContinuousIntegrationBuild=true --nologo $variantArgs
+        done
+
+    - name: Publish bundled plugins on Windows
+      if: startsWith(matrix.os, 'windows-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
+        if ($env:VARIANT -like 'generic*') {
+            $variantArgs = '-p:TargetLatestRuntimePatch=false', '-p:UseAppHost=false'
+        } else {
+            $variantArgs = '-r', "$env:VARIANT"
+        }
+
+        foreach ($plugin in $env:PLUGINS_BUNDLED.Split([char[]] $null, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+            dotnet publish "$plugin" -c "$env:CONFIGURATION" -o "out\$env:VARIANT\plugins\$plugin" "-p:ASFVariant=$env:VARIANT" -p:ContinuousIntegrationBuild=true --nologo $variantArgs
 
             if ($LastExitCode -ne 0) {
                 throw "Last command failed."
             }
         }
 
-        foreach ($variant in $env:VARIANTS.Split([char[]] $null, [System.StringSplitOptions]::RemoveEmptyEntries)) {
-            Start-Job -Name "$variant" $PublishBlock -ArgumentList "$variant"
+    - name: Zip ASF-${{ matrix.variant }} on Unix
+      if: startsWith(matrix.os, 'macos-') || startsWith(matrix.os, 'ubuntu-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # By default use fastest compression
+        seven_zip_args="-mx=1"
+        zip_args="-1"
+
+        # Tweak compression args for release publishing
+        case "$GITHUB_REF" in
+            "refs/tags/"*)
+                seven_zip_args="-mx=9 -mfb=258 -mpass=15"
+                zip_args="-9"
+                ;;
+        esac
+
+        # Create the final zip file
+        case "$(uname -s)" in
+            "Darwin")
+                # We prefer to use zip on macOS as 7z implementation on that OS doesn't handle file permissions (chmod +x)
+                if command -v zip >/dev/null; then
+                    (
+                        cd "${GITHUB_WORKSPACE}/out/${VARIANT}"
+                        zip -q -r $zip_args "../ASF-${VARIANT}.zip" .
+                    )
+                else
+                    7z a -bd -slp -tzip -mm=Deflate $seven_zip_args "out/ASF-${VARIANT}.zip" "${GITHUB_WORKSPACE}/out/${VARIANT}/*"
+                fi
+                ;;
+            *)
+                if command -v 7z >/dev/null; then
+                    7z a -bd -slp -tzip -mm=Deflate $seven_zip_args "out/ASF-${VARIANT}.zip" "${GITHUB_WORKSPACE}/out/${VARIANT}/*"
+                else
+                    (
+                        cd "${GITHUB_WORKSPACE}/out/${VARIANT}"
+                        zip -q -r $zip_args "../ASF-${VARIANT}.zip" .
+                    )
+                fi
+                ;;
+        esac
+
+    - name: Zip ASF-${{ matrix.variant }} on Windows
+      if: startsWith(matrix.os, 'windows-')
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: pwsh
+      run: |
+        Set-StrictMode -Version Latest
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
+        # By default use fastest compression
+        $compressionArgs = '-mx=1'
+
+        # Tweak compression args for release publishing
+        if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $compressionArgs = '-mx=9', '-mfb=258', '-mpass=15'
         }
 
-        Get-Job | Receive-Job -Wait
+        # Create the final zip file
+        7z a -bd -slp -tzip -mm=Deflate $compressionArgs "out\ASF-$env:VARIANT.zip" "$env:GITHUB_WORKSPACE\out\$env:VARIANT\*"
 
-    - name: Upload ASF-generic
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
-      with:
-        name: ${{ matrix.os }}_ASF-generic
-        path: out/ASF-generic.zip
+        if ($LastExitCode -ne 0) {
+            throw "Last command failed."
+        }
 
-    - name: Upload ASF-generic-netf
-      continue-on-error: true
-      if: startsWith(matrix.os, 'windows-')
-      uses: actions/upload-artifact@v2.2.4
-      with:
-        name: ${{ matrix.os }}_ASF-generic-netf
-        path: out/ASF-generic-netf.zip
+        # We can aid non-windows users by adding chmod +x flag to appropriate executables directly in the zip file
+        # This is ALMOST a hack, but works reliably enough
+        if (Test-Path "tools\zip_exec\zip_exec.exe" -PathType Leaf) {
+            $executableFiles = @()
 
-    - name: Upload ASF-linux-arm
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
-      with:
-        name: ${{ matrix.os }}_ASF-linux-arm
-        path: out/ASF-linux-arm.zip
+            if ($env:VARIANT -like 'generic*') {
+                $executableFiles += 'ArchiSteamFarm.sh', 'ArchiSteamFarm-Service.sh'
+            } elseif (($env:VARIANT -like 'linux*') -or ($env:VARIANT -like 'osx*')) {
+                $executableFiles += 'ArchiSteamFarm', 'ArchiSteamFarm-Service.sh'
+            }
 
-    - name: Upload ASF-linux-arm64
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
-      with:
-        name: ${{ matrix.os }}_ASF-linux-arm64
-        path: out/ASF-linux-arm64.zip
+            foreach ($executableFile in $executableFiles) {
+                tools\zip_exec\zip_exec.exe "out\ASF-$env:VARIANT.zip" "$executableFile"
 
-    - name: Upload ASF-linux-x64
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
-      with:
-        name: ${{ matrix.os }}_ASF-linux-x64
-        path: out/ASF-linux-x64.zip
+                if ($LastExitCode -ne 0) {
+                    throw "Last command failed."
+                }
+            }
+        }
 
-    - name: Upload ASF-osx-x64
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
+    - name: Generate artifact attestation for ASF-${{ matrix.variant }}.zip
+      if: ${{ github.event_name != 'pull_request' }}
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
       with:
-        name: ${{ matrix.os }}_ASF-osx-x64
-        path: out/ASF-osx-x64.zip
+        subject-path: out/ASF-${{ matrix.variant }}.zip
 
-    - name: Upload ASF-win-x64
-      continue-on-error: true
-      uses: actions/upload-artifact@v2.2.4
+    - name: Upload ASF-${{ matrix.variant }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: ${{ matrix.os }}_ASF-win-x64
-        path: out/ASF-win-x64.zip
+        compression-level: 1
+        if-no-files-found: error
+        name: ${{ matrix.os }}_ASF-${{ matrix.variant }}
+        path: out/ASF-${{ matrix.variant }}.zip
+
+    - name: Publish included plugins on Unix
+      if: ${{ matrix.os == 'ubuntu-latest' && matrix.variant == 'generic' }}
+      env:
+        VARIANT: ${{ matrix.variant }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # By default use fastest compression
+        seven_zip_args="-mx=1"
+        zip_args="-1"
+
+        # Tweak compression args for release publishing
+        case "$GITHUB_REF" in
+            "refs/tags/"*)
+                seven_zip_args="-mx=9 -mfb=258 -mpass=15"
+                zip_args="-9"
+                ;;
+        esac
+
+        for plugin in $PLUGINS_INCLUDED; do
+            dotnet publish "$plugin" -c "$CONFIGURATION" -o "out/${plugin}" "-p:ASFVariant=${VARIANT}" -p:ContinuousIntegrationBuild=true -p:TargetLatestRuntimePatch=false -p:UseAppHost=false --nologo
+
+            # Create the final zip file
+            if command -v 7z >/dev/null; then
+                7z a -bd -slp -tzip -mm=Deflate $seven_zip_args "out/${plugin}.zip" "${GITHUB_WORKSPACE}/out/${plugin}/*"
+            else
+                (
+                    cd "${GITHUB_WORKSPACE}/out/${plugin}"
+                    zip -q -r $zip_args "../${plugin}.zip" .
+                )
+            fi
+        done
+
+    - name: Generate artifact attestation for ArchiSteamFarm.OfficialPlugins.Monitoring
+      if: ${{ github.event_name != 'pull_request' && matrix.os == 'ubuntu-latest' && matrix.variant == 'generic' }}
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: out/ArchiSteamFarm.OfficialPlugins.Monitoring.zip
+
+    - name: Upload ArchiSteamFarm.OfficialPlugins.Monitoring
+      if: ${{ matrix.os == 'ubuntu-latest' && matrix.variant == 'generic' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        compression-level: 1
+        if-no-files-found: error
+        name: ArchiSteamFarm.OfficialPlugins.Monitoring
+        path: out/ArchiSteamFarm.OfficialPlugins.Monitoring.zip
+
+  release:
+    if: ${{ github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/') }}
+    needs: publish-asf
+    environment: release-github
+    runs-on: ubuntu-latest
+
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        show-progress: false
+
+    - name: Download ASF-generic artifact from ubuntu-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ubuntu-latest_ASF-generic
+        path: out
+
+    - name: Download ASF-linux-arm artifact from ubuntu-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ubuntu-latest_ASF-linux-arm
+        path: out
+
+    - name: Download ASF-linux-arm64 artifact from ubuntu-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ubuntu-latest_ASF-linux-arm64
+        path: out
+
+    - name: Download ASF-linux-x64 artifact from ubuntu-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ubuntu-latest_ASF-linux-x64
+        path: out
+
+    - name: Download ASF-osx-arm64 artifact from macos-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: macos-latest_ASF-osx-arm64
+        path: out
+
+    - name: Download ASF-osx-x64 artifact from macos-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: macos-latest_ASF-osx-x64
+        path: out
+
+    - name: Download ASF-win-arm64 artifact from windows-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: windows-latest_ASF-win-arm64
+        path: out
+
+    - name: Download ASF-win-x64 artifact from windows-latest
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: windows-latest_ASF-win-x64
+        path: out
+
+    - name: Download ArchiSteamFarm.OfficialPlugins.Monitoring artifact
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ArchiSteamFarm.OfficialPlugins.Monitoring
+        path: out
+
+    - name: Import GPG key for signing
+      uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd # v7.0.0
+      with:
+        gpg_private_key: ${{ secrets.ARCHIBOT_GPG_PRIVATE_KEY }}
+
+    - name: Generate SHA-512 checksums and signature
+      shell: sh
+      working-directory: out
+      run: |
+        set -eu
+
+        sha512sum *.zip > SHA512SUMS
+        gpg -a -b -o SHA512SUMS.sign SHA512SUMS
+
+    - name: Generate artifact attestation for SHA512SUMS
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: out/SHA512SUMS
+
+    - name: Upload SHA512SUMS
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        compression-level: 1
+        if-no-files-found: error
+        name: SHA512SUMS
+        path: out/SHA512SUMS
+
+    - name: Generate artifact attestation for SHA512SUMS.sign
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: out/SHA512SUMS.sign
+
+    - name: Upload SHA512SUMS.sign
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        compression-level: 1
+        if-no-files-found: error
+        name: SHA512SUMS.sign
+        path: out/SHA512SUMS.sign
 
     - name: Create ArchiSteamFarm GitHub release
-      id: github_release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/create-release@v1.1.4
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1.21.0
       with:
-        tag_name: ${{ github.ref }}
-        release_name: ArchiSteamFarm V${{ github.ref }}
-        body_path: .github/RELEASE_TEMPLATE.md
+        allowUpdates: true
+        artifactErrorsFailBuild: true
+        artifacts: "out/*"
+        bodyFile: .github/RELEASE_TEMPLATE.md
+        immutableCreate: true
+        makeLatest: false
+        name: ArchiSteamFarm V${{ github.ref_name }}
         prerelease: true
-
-    - name: Upload ASF-generic to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-generic.zip
-        asset_name: ASF-generic.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-generic-netf to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-generic-netf.zip
-        asset_name: ASF-generic-netf.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-linux-arm to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-linux-arm.zip
-        asset_name: ASF-linux-arm.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-linux-arm64 to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-linux-arm64.zip
-        asset_name: ASF-linux-arm64.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-linux-x64 to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-linux-x64.zip
-        asset_name: ASF-linux-x64.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-osx-x64 to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-osx-x64.zip
-        asset_name: ASF-osx-x64.zip
-        asset_content_type: application/zip
-
-    - name: Upload ASF-win-x64 to GitHub release
-      if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && startsWith(matrix.os, 'windows-') }}
-      uses: actions/upload-release-asset@v1.0.2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.github_release.outputs.upload_url }}
-        asset_path: out/ASF-win-x64.zip
-        asset_name: ASF-win-x64.zip
-        asset_content_type: application/zip
+        token: ${{ secrets.ARCHIBOT_GITHUB_TOKEN }}
+        updateOnlyUnreleased: true

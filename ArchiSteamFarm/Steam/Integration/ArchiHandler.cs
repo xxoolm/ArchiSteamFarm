@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,803 +25,1225 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using ArchiSteamFarm.Core;
+using ArchiSteamFarm.Localization;
 using ArchiSteamFarm.NLog;
+using ArchiSteamFarm.Steam.Data;
 using ArchiSteamFarm.Steam.Integration.Callbacks;
 using ArchiSteamFarm.Steam.Integration.CMsgs;
+using ArchiSteamFarm.Web;
 using JetBrains.Annotations;
 using SteamKit2;
 using SteamKit2.Internal;
+using SteamKit2.WebUI.Internal;
+using CMsgClientChangeStatus = SteamKit2.Internal.CMsgClientChangeStatus;
+using CMsgClientCommentNotifications = SteamKit2.Internal.CMsgClientCommentNotifications;
+using CMsgClientGamesPlayed = SteamKit2.Internal.CMsgClientGamesPlayed;
+using CMsgClientGetClientAppListResponse = SteamKit2.Internal.CMsgClientGetClientAppListResponse;
+using CMsgClientItemAnnouncements = SteamKit2.Internal.CMsgClientItemAnnouncements;
+using CMsgClientRedeemGuestPass = SteamKit2.Internal.CMsgClientRedeemGuestPass;
+using CMsgClientRequestItemAnnouncements = SteamKit2.Internal.CMsgClientRequestItemAnnouncements;
+using CMsgClientSharedLibraryLockStatus = SteamKit2.Internal.CMsgClientSharedLibraryLockStatus;
+using CMsgClientUserNotifications = SteamKit2.Internal.CMsgClientUserNotifications;
+using EPersonaStateFlag = SteamKit2.EPersonaStateFlag;
 
-namespace ArchiSteamFarm.Steam.Integration {
-	public sealed class ArchiHandler : ClientMsgHandler {
-		internal const byte MaxGamesPlayedConcurrently = 32; // This is limit introduced by Steam Network
+namespace ArchiSteamFarm.Steam.Integration;
 
-		private readonly ArchiLogger ArchiLogger;
-		private readonly SteamUnifiedMessages.UnifiedService<IChatRoom> UnifiedChatRoomService;
-		private readonly SteamUnifiedMessages.UnifiedService<IClanChatRooms> UnifiedClanChatRoomsService;
-		private readonly SteamUnifiedMessages.UnifiedService<IEcon> UnifiedEconService;
-		private readonly SteamUnifiedMessages.UnifiedService<IFriendMessages> UnifiedFriendMessagesService;
-		private readonly SteamUnifiedMessages.UnifiedService<IPlayer> UnifiedPlayerService;
-		private readonly SteamUnifiedMessages.UnifiedService<ITwoFactor> UnifiedTwoFactorService;
+public sealed class ArchiHandler : ClientMsgHandler, IDisposable {
+	internal const byte MaxGamesPlayedConcurrently = 32; // This is limit introduced by Steam Network
 
-		internal DateTime LastPacketReceived { get; private set; }
+	private readonly ArchiLogger ArchiLogger;
+	private readonly SemaphoreSlim InventorySemaphore = new(1, 1);
+	private readonly AccountPrivateApps UnifiedAccountPrivateApps;
+	private readonly ChatRoom UnifiedChatRoomService;
+	private readonly ClanChatRooms UnifiedClanChatRoomsService;
+	private readonly Credentials UnifiedCredentialsService;
+	private readonly Econ UnifiedEconService;
+	private readonly FamilyGroups UnifiedFamilyGroups;
+	private readonly FriendMessages UnifiedFriendMessagesService;
+	private readonly LoyaltyRewards UnifiedLoyaltyRewards;
+	private readonly Player UnifiedPlayerService;
+	private readonly Store UnifiedStoreService;
+	private readonly TwoFactor UnifiedTwoFactorService;
+	private readonly UserAccount UnifiedUserAccountService;
 
-		internal ArchiHandler(ArchiLogger archiLogger, SteamUnifiedMessages steamUnifiedMessages) {
-			if (steamUnifiedMessages == null) {
-				throw new ArgumentNullException(nameof(steamUnifiedMessages));
-			}
+	internal DateTime LastPacketReceived { get; private set; }
 
-			ArchiLogger = archiLogger ?? throw new ArgumentNullException(nameof(archiLogger));
-			UnifiedChatRoomService = steamUnifiedMessages.CreateService<IChatRoom>();
-			UnifiedClanChatRoomsService = steamUnifiedMessages.CreateService<IClanChatRooms>();
-			UnifiedEconService = steamUnifiedMessages.CreateService<IEcon>();
-			UnifiedFriendMessagesService = steamUnifiedMessages.CreateService<IFriendMessages>();
-			UnifiedPlayerService = steamUnifiedMessages.CreateService<IPlayer>();
-			UnifiedTwoFactorService = steamUnifiedMessages.CreateService<ITwoFactor>();
+	internal ArchiHandler(ArchiLogger archiLogger, SteamUnifiedMessages steamUnifiedMessages) {
+		ArgumentNullException.ThrowIfNull(archiLogger);
+		ArgumentNullException.ThrowIfNull(steamUnifiedMessages);
+
+		ArchiLogger = archiLogger;
+
+		UnifiedAccountPrivateApps = steamUnifiedMessages.CreateService<AccountPrivateApps>();
+		UnifiedChatRoomService = steamUnifiedMessages.CreateService<ChatRoom>();
+		UnifiedClanChatRoomsService = steamUnifiedMessages.CreateService<ClanChatRooms>();
+		UnifiedCredentialsService = steamUnifiedMessages.CreateService<Credentials>();
+		UnifiedEconService = steamUnifiedMessages.CreateService<Econ>();
+		UnifiedFamilyGroups = steamUnifiedMessages.CreateService<FamilyGroups>();
+		UnifiedFriendMessagesService = steamUnifiedMessages.CreateService<FriendMessages>();
+		UnifiedLoyaltyRewards = steamUnifiedMessages.CreateService<LoyaltyRewards>();
+		UnifiedPlayerService = steamUnifiedMessages.CreateService<Player>();
+		UnifiedStoreService = steamUnifiedMessages.CreateService<Store>();
+		UnifiedTwoFactorService = steamUnifiedMessages.CreateService<TwoFactor>();
+		UnifiedUserAccountService = steamUnifiedMessages.CreateService<UserAccount>();
+	}
+
+	public void Dispose() => InventorySemaphore.Dispose();
+
+	[PublicAPI]
+	public async Task<bool> AddFriend(ulong steamID, CancellationToken cancellationToken = default) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
 		}
 
-		[PublicAPI]
-		public async Task<bool> AddFriend(ulong steamID) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return false;
-			}
-
-			CPlayer_AddFriend_Request request = new() { steamid = steamID };
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedPlayerService.SendMessage(x => x.AddFriend(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return false;
-			}
-
-			return response.Result == EResult.OK;
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
 		}
 
-		public override void HandleMsg(IPacketMsg packetMsg) {
-			if (packetMsg == null) {
-				throw new ArgumentNullException(nameof(packetMsg));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			LastPacketReceived = DateTime.UtcNow;
-
-			switch (packetMsg.MsgType) {
-				case EMsg.ClientCommentNotifications:
-					ClientMsgProtobuf<CMsgClientCommentNotifications> commentNotifications = new(packetMsg);
-					Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, commentNotifications.Body));
-
-					break;
-				case EMsg.ClientItemAnnouncements:
-					ClientMsgProtobuf<CMsgClientItemAnnouncements> itemAnnouncements = new(packetMsg);
-					Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, itemAnnouncements.Body));
-
-					break;
-				case EMsg.ClientPlayingSessionState:
-					ClientMsgProtobuf<CMsgClientPlayingSessionState> playingSessionState = new(packetMsg);
-					Client.PostCallback(new PlayingSessionStateCallback(packetMsg.TargetJobID, playingSessionState.Body));
-
-					break;
-				case EMsg.ClientPurchaseResponse:
-					ClientMsgProtobuf<CMsgClientPurchaseResponse> purchaseResponse = new(packetMsg);
-					Client.PostCallback(new PurchaseResponseCallback(packetMsg.TargetJobID, purchaseResponse.Body));
-
-					break;
-				case EMsg.ClientRedeemGuestPassResponse:
-					ClientMsgProtobuf<CMsgClientRedeemGuestPassResponse> redeemGuestPassResponse = new(packetMsg);
-					Client.PostCallback(new RedeemGuestPassResponseCallback(packetMsg.TargetJobID, redeemGuestPassResponse.Body));
-
-					break;
-				case EMsg.ClientSharedLibraryLockStatus:
-					ClientMsgProtobuf<CMsgClientSharedLibraryLockStatus> sharedLibraryLockStatus = new(packetMsg);
-					Client.PostCallback(new SharedLibraryLockStatusCallback(packetMsg.TargetJobID, sharedLibraryLockStatus.Body));
-
-					break;
-				case EMsg.ClientUserNotifications:
-					ClientMsgProtobuf<CMsgClientUserNotifications> userNotifications = new(packetMsg);
-					Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, userNotifications.Body));
-
-					break;
-				case EMsg.ClientVanityURLChangedNotification:
-					ClientMsgProtobuf<CMsgClientVanityURLChangedNotification> vanityURLChangedNotification = new(packetMsg);
-					Client.PostCallback(new VanityURLChangedCallback(packetMsg.TargetJobID, vanityURLChangedNotification.Body));
-
-					break;
-			}
+		if (!Client.IsConnected) {
+			return false;
 		}
 
-		[PublicAPI]
-		public async Task<bool> RemoveFriend(ulong steamID) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
+		CPlayer_AddFriend_Request request = new() {
+			steamid = steamID
+		};
 
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+		SteamUnifiedMessages.ServiceMethodResponse<CPlayer_AddFriend_Response> response;
 
-			if (!Client.IsConnected) {
-				return false;
-			}
+		try {
+			response = await UnifiedPlayerService.AddFriend(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
 
-			CPlayer_RemoveFriend_Request request = new() { steamid = steamID };
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedPlayerService.SendMessage(x => x.RemoveFriend(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return false;
-			}
-
-			return response.Result == EResult.OK;
+			return false;
 		}
 
-		internal void AckChatMessage(ulong chatGroupID, ulong chatID, uint timestamp) {
-			if (chatGroupID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatGroupID));
-			}
+		return response.Result == EResult.OK;
+	}
 
-			if (chatID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatID));
-			}
-
-			if (timestamp == 0) {
-				throw new ArgumentOutOfRangeException(nameof(timestamp));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return;
-			}
-
-			CChatRoom_AckChatMessage_Notification request = new() {
-				chat_group_id = chatGroupID,
-				chat_id = chatID,
-				timestamp = timestamp
-			};
-
-			UnifiedChatRoomService.SendMessage(x => x.AckChatMessage(request), true);
+	[PublicAPI]
+	public async Task<CClanChatRooms_GetClanChatRoomInfo_Response?> GetClanChatRoomInfo(ulong steamID, CancellationToken cancellationToken = default) {
+		if ((steamID == 0) || !new SteamID(steamID).IsClanAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
 		}
 
-		internal void AckMessage(ulong steamID, uint timestamp) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
-
-			if (timestamp == 0) {
-				throw new ArgumentOutOfRangeException(nameof(timestamp));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return;
-			}
-
-			CFriendMessages_AckMessage_Notification request = new() {
-				steamid_partner = steamID,
-				timestamp = timestamp
-			};
-
-			UnifiedFriendMessagesService.SendMessage(x => x.AckMessage(request), true);
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
 		}
 
-		internal void AcknowledgeClanInvite(ulong steamID, bool acceptInvite) {
-			if ((steamID == 0) || !new SteamID(steamID).IsClanAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return;
-			}
-
-			ClientMsg<CMsgClientAcknowledgeClanInvite> request = new() {
-				Body = {
-					ClanID = steamID,
-					AcceptInvite = acceptInvite
-				}
-			};
-
-			Client.Send(request);
+		if (!Client.IsConnected) {
+			return null;
 		}
 
-		internal async Task<ulong> GetClanChatGroupID(ulong steamID) {
-			if ((steamID == 0) || !new SteamID(steamID).IsClanAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
+		CClanChatRooms_GetClanChatRoomInfo_Request request = new() {
+			autocreate = true,
+			steamid = steamID
+		};
 
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+		SteamUnifiedMessages.ServiceMethodResponse<CClanChatRooms_GetClanChatRoomInfo_Response> response;
 
-			if (!Client.IsConnected) {
-				return 0;
-			}
+		try {
+			response = await UnifiedClanChatRoomsService.GetClanChatRoomInfo(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
 
-			CClanChatRooms_GetClanChatRoomInfo_Request request = new() {
-				autocreate = true,
-				steamid = steamID
-			};
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedClanChatRoomsService.SendMessage(x => x.GetClanChatRoomInfo(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return 0;
-			}
-
-			if (response.Result != EResult.OK) {
-				return 0;
-			}
-
-			CClanChatRooms_GetClanChatRoomInfo_Response body = response.GetDeserializedResponse<CClanChatRooms_GetClanChatRoomInfo_Response>();
-
-			return body.chat_group_summary.chat_group_id;
+			return null;
 		}
 
-		internal async Task<uint?> GetLevel() {
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+		return response.Result == EResult.OK ? response.Body : null;
+	}
 
-			if (!Client.IsConnected) {
-				return null;
-			}
-
-			CPlayer_GetGameBadgeLevels_Request request = new();
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedPlayerService.SendMessage(x => x.GetGameBadgeLevels(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-
-			if (response.Result != EResult.OK) {
-				return null;
-			}
-
-			CPlayer_GetGameBadgeLevels_Response body = response.GetDeserializedResponse<CPlayer_GetGameBadgeLevels_Response>();
-
-			return body.player_level;
+	[PublicAPI]
+	public async Task<CCredentials_LastCredentialChangeTime_Response?> GetCredentialChangeTimeDetails(CancellationToken cancellationToken = default) {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
 		}
 
-		internal async Task<HashSet<ulong>?> GetMyChatGroupIDs() {
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return null;
-			}
-
-			CChatRoom_GetMyChatRoomGroups_Request request = new();
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedChatRoomService.SendMessage(x => x.GetMyChatRoomGroups(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-
-			if (response.Result != EResult.OK) {
-				return null;
-			}
-
-			CChatRoom_GetMyChatRoomGroups_Response body = response.GetDeserializedResponse<CChatRoom_GetMyChatRoomGroups_Response>();
-
-			return body.chat_room_groups.Select(chatRoom => chatRoom.group_summary.chat_group_id).ToHashSet();
+		if (!Client.IsConnected) {
+			return null;
 		}
 
-		internal async Task<CPrivacySettings?> GetPrivacySettings() {
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+		CCredentials_LastCredentialChangeTime_Request request = new();
 
-			if (!Client.IsConnected) {
-				return null;
-			}
+		SteamUnifiedMessages.ServiceMethodResponse<CCredentials_LastCredentialChangeTime_Response> response;
 
-			CPlayer_GetPrivacySettings_Request request = new();
+		try {
+			response = await UnifiedCredentialsService.GetCredentialChangeTimeDetails(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
 
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedPlayerService.SendMessage(x => x.GetPrivacySettings(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-
-			if (response.Result != EResult.OK) {
-				return null;
-			}
-
-			CPlayer_GetPrivacySettings_Response body = response.GetDeserializedResponse<CPlayer_GetPrivacySettings_Response>();
-
-			return body.privacy_settings;
+			return null;
 		}
 
-		internal async Task<string?> GetTradeToken() {
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+		return response.Result == EResult.OK ? response.Body : null;
+	}
 
-			if (!Client.IsConnected) {
-				return null;
-			}
+	[PublicAPI]
+	public async IAsyncEnumerable<Asset> GetMyInventoryAsync(uint appID = Asset.SteamAppID, ulong contextID = Asset.SteamCommunityContextID, bool tradableOnly = false, bool marketableOnly = false, ushort itemsCountPerRequest = ArchiWebHandler.MaxItemsInSingleInventoryRequest, string? language = null, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
+		ArgumentOutOfRangeException.ThrowIfZero(appID);
+		ArgumentOutOfRangeException.ThrowIfZero(contextID);
+		ArgumentOutOfRangeException.ThrowIfZero(itemsCountPerRequest);
 
-			CEcon_GetTradeOfferAccessToken_Request request = new();
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedEconService.SendMessage(x => x.GetTradeOfferAccessToken(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-
-			if (response.Result != EResult.OK) {
-				return null;
-			}
-
-			CEcon_GetTradeOfferAccessToken_Response body = response.GetDeserializedResponse<CEcon_GetTradeOfferAccessToken_Response>();
-
-			return body.trade_offer_access_token;
+		if (!Client.IsConnected) {
+			throw new TimeoutException(Strings.FormatWarningFailedWithError(nameof(Client.IsConnected)));
 		}
 
-		internal async Task<string?> GetTwoFactorDeviceIdentifier(ulong steamID) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
+		SteamID? steamID = Client.SteamID;
 
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return null;
-			}
-
-			CTwoFactor_Status_Request request = new() {
-				steamid = steamID
-			};
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedTwoFactorService.SendMessage(x => x.QueryStatus(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-
-			if (response.Result != EResult.OK) {
-				return null;
-			}
-
-			CTwoFactor_Status_Response body = response.GetDeserializedResponse<CTwoFactor_Status_Response>();
-
-			return body.device_identifier;
+		if (steamID == null) {
+			throw new TimeoutException(Strings.FormatWarningFailedWithError(nameof(Client.SteamID)));
 		}
 
-		internal async Task<bool> JoinChatRoomGroup(ulong chatGroupID) {
-			if (chatGroupID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatGroupID));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return false;
-			}
-
-			CChatRoom_JoinChatRoomGroup_Request request = new() { chat_group_id = chatGroupID };
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedChatRoomService.SendMessage(x => x.JoinChatRoomGroup(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return false;
-			}
-
-			return response.Result == EResult.OK;
+		if (steamID == 0) {
+			throw new InvalidOperationException(nameof(steamID));
 		}
 
-		internal async Task PlayGames(IReadOnlyCollection<uint> gameIDs, string? gameName = null) {
-			if (gameIDs == null) {
-				throw new ArgumentNullException(nameof(gameIDs));
-			}
+		CEcon_GetInventoryItemsWithDescriptions_Request request = new() {
+			appid = appID,
+			contextid = contextID,
 
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
+			filters = new CEcon_GetInventoryItemsWithDescriptions_Request.FilterOptions {
+				tradable_only = tradableOnly,
+				marketable_only = marketableOnly
+			},
 
-			if (!Client.IsConnected) {
-				return;
-			}
+			get_descriptions = true,
+			steamid = steamID,
+			count = itemsCountPerRequest
+		};
 
-			ClientMsgProtobuf<CMsgClientGamesPlayed> request = new(EMsg.ClientGamesPlayedWithDataBlob) {
-				Body = {
-					client_os_type = (uint) Bot.OSType
-				}
-			};
+		if (!string.IsNullOrEmpty(language)) {
+			request.language = language;
+		}
 
-			byte maxGamesCount = MaxGamesPlayedConcurrently;
+		// We need to store asset IDs to make sure we won't get duplicate items
+		HashSet<ulong>? assetIDs = null;
 
-			if (!string.IsNullOrEmpty(gameName)) {
-				// If we have custom name to display, we must workaround the Steam network broken behaviour and send request on clean non-playing session
-				// This ensures that custom name will in fact display properly
-				Client.Send(request);
-				await Task.Delay(Bot.CallbackSleep).ConfigureAwait(false);
+		Dictionary<(ulong ClassID, ulong InstanceID), InventoryDescription>? descriptions = null;
 
-				request.Body.games_played.Add(
-					new CMsgClientGamesPlayed.GamePlayed {
-						game_extra_info = gameName,
-						game_id = new GameID {
-							AppType = GameID.GameType.Shortcut,
-							ModID = uint.MaxValue
-						}
+		await InventorySemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		try {
+			while (true) {
+				SteamUnifiedMessages.ServiceMethodResponse<CEcon_GetInventoryItemsWithDescriptions_Response>? response = null;
+
+				for (byte i = 0; (i < WebBrowser.MaxTries) && (response?.Result != EResult.OK) && Client.IsConnected && (Client.SteamID == steamID); i++) {
+					if (i > 0) {
+						// It seems 2 seconds is enough to win over DuplicateRequest, so we'll use that for this and also other network-related failures
+						await Task.Delay(2000, cancellationToken).ConfigureAwait(false);
 					}
-				);
 
-				// Max games count is affected by valid AppIDs only, therefore gameName alone doesn't need exclusive slot
-				maxGamesCount++;
+					try {
+						response = await UnifiedEconService.GetInventoryItemsWithDescriptions(request).ToLongRunningTask().ConfigureAwait(false);
+					} catch (Exception e) {
+						ArchiLogger.LogGenericWarningException(e);
+
+						continue;
+					}
+
+					// Interpret the result and see what we should do about it
+					switch (response.Result) {
+						case EResult.OK:
+							// Success, we can continue
+							break;
+						case EResult.Busy:
+						case EResult.DuplicateRequest:
+						case EResult.Fail:
+						case EResult.RemoteCallFailed:
+						case EResult.ServiceUnavailable:
+						case EResult.Timeout:
+							// Expected failures that we should be able to retry
+							continue;
+						case EResult.NoMatch:
+							// Expected failures that we're not going to retry
+							throw new TimeoutException(Strings.FormatWarningFailedWithError(response.Result));
+						default:
+							// Unknown failures, report them and do not retry since we're unsure if we should
+							ArchiLogger.LogGenericError(Strings.FormatWarningUnknownValuePleaseReport(nameof(response.Result), response.Result));
+
+							throw new TimeoutException(Strings.FormatWarningFailedWithError(response.Result));
+					}
+				}
+
+				if (response == null) {
+					throw new TimeoutException(Strings.FormatErrorObjectIsNull(nameof(response)));
+				}
+
+				if (response.Result != EResult.OK) {
+					throw new TimeoutException(Strings.FormatWarningFailedWithError(response.Result));
+				}
+
+				if ((response.Body.total_inventory_count == 0) || (response.Body.assets.Count == 0)) {
+					// Empty inventory
+					yield break;
+				}
+
+				if (response.Body.descriptions.Count == 0) {
+					throw new InvalidOperationException(nameof(response.Body.descriptions));
+				}
+
+				if (response.Body.total_inventory_count > Array.MaxLength) {
+					throw new InvalidOperationException(nameof(response.Body.total_inventory_count));
+				}
+
+				assetIDs ??= new HashSet<ulong>((int) response.Body.total_inventory_count);
+
+				if (descriptions == null) {
+					descriptions = new Dictionary<(ulong ClassID, ulong InstanceID), InventoryDescription>();
+				} else {
+					// We don't need descriptions from the previous request
+					descriptions.Clear();
+				}
+
+				foreach (CEconItem_Description? description in response.Body.descriptions) {
+					if (description.classid == 0) {
+						throw new NotSupportedException(Strings.FormatErrorObjectIsNull(nameof(description.classid)));
+					}
+
+					(ulong ClassID, ulong InstanceID) key = (description.classid, description.instanceid);
+
+					if (descriptions.ContainsKey(key)) {
+						continue;
+					}
+
+					descriptions.Add(key, new InventoryDescription(description));
+				}
+
+				foreach (CEcon_Asset? asset in response.Body.assets.Where(asset => assetIDs.Add(asset.assetid))) {
+					InventoryDescription? description = descriptions.GetValueOrDefault((asset.classid, asset.instanceid));
+
+					// Extra bulletproofing against Steam showing us middle finger
+					if ((tradableOnly && (description?.Tradable != true)) || (marketableOnly && (description?.Marketable != true))) {
+						continue;
+					}
+
+					yield return new Asset(asset, description);
+				}
+
+				if (!response.Body.more_items) {
+					yield break;
+				}
+
+				if (response.Body.last_assetid == 0) {
+					throw new NotSupportedException(Strings.FormatErrorObjectIsNull(nameof(response.Body.last_assetid)));
+				}
+
+				request.start_assetid = response.Body.last_assetid;
+			}
+		} finally {
+			InventorySemaphore.Release();
+		}
+	}
+
+	[PublicAPI]
+	public async Task<Dictionary<uint, string>?> GetOwnedGames(ulong steamID, CancellationToken cancellationToken = default) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CPlayer_GetOwnedGames_Request request = new() {
+			steamid = steamID,
+			include_appinfo = true,
+			include_free_sub = true,
+			include_played_free_games = true,
+			skip_unvetted_apps = false
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CPlayer_GetOwnedGames_Response> response;
+
+		try {
+			response = await UnifiedPlayerService.GetOwnedGames(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body.games.ToDictionary(static game => (uint) game.appid, static game => game.name) : null;
+	}
+
+	[PublicAPI]
+	public async Task<long?> GetPointsBalance(CancellationToken cancellationToken = default) {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		SteamID? steamID = Client.SteamID;
+
+		if (steamID == null) {
+			return null;
+		}
+
+		if (steamID == 0) {
+			throw new InvalidOperationException(nameof(steamID));
+		}
+
+		CLoyaltyRewards_GetSummary_Request request = new() { steamid = steamID };
+
+		SteamUnifiedMessages.ServiceMethodResponse<CLoyaltyRewards_GetSummary_Response> response;
+
+		try {
+			response = await UnifiedLoyaltyRewards.GetSummary(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body.summary?.points : null;
+	}
+
+	[PublicAPI]
+	public async Task<Dictionary<uint, LoyaltyRewardDefinition>?> GetRewardItems(IReadOnlyCollection<uint> definitionIDs, CancellationToken cancellationToken = default) {
+		if ((definitionIDs == null) || (definitionIDs.Count == 0)) {
+			throw new ArgumentNullException(nameof(definitionIDs));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CLoyaltyRewards_QueryRewardItems_Request request = new();
+
+		request.definitionids.AddRange(definitionIDs is IReadOnlySet<uint> or ISet<uint> ? definitionIDs : definitionIDs.Distinct());
+
+		Dictionary<uint, LoyaltyRewardDefinition>? result = null;
+
+		while (true) {
+			SteamUnifiedMessages.ServiceMethodResponse<CLoyaltyRewards_QueryRewardItems_Response> response;
+
+			try {
+				response = await UnifiedLoyaltyRewards.QueryRewardItems(request).ToLongRunningTask().ConfigureAwait(false);
+			} catch (Exception e) {
+				ArchiLogger.LogGenericWarningException(e);
+
+				return null;
 			}
 
-			if (gameIDs.Count > 0) {
-#pragma warning disable CA1508 // False positive, not every IReadOnlyCollection is ISet
-				IEnumerable<uint> uniqueValidGameIDs = (gameIDs as ISet<uint> ?? gameIDs.Distinct()).Where(gameID => gameID > 0);
-#pragma warning restore CA1508 // False positive, not every IReadOnlyCollection is ISet
+			if (response.Result != EResult.OK) {
+				return null;
+			}
 
-				foreach (uint gameID in uniqueValidGameIDs) {
-					if (request.Body.games_played.Count >= maxGamesCount) {
+			result ??= new Dictionary<uint, LoyaltyRewardDefinition>(response.Body.total_count);
+
+			bool added = false;
+
+			foreach (LoyaltyRewardDefinition _ in response.Body.definitions.Where(entry => result.TryAdd(entry.defid, entry))) {
+				added = true;
+			}
+
+			// Normally it should be enough to compare counts exclusively, but we're going to use additional bulletproofing against infinite loops just in case
+			if (!added || (result.Count >= response.Body.total_count) || string.IsNullOrEmpty(response.Body.next_cursor) || (request.cursor == response.Body.next_cursor)) {
+				return result;
+			}
+
+			request.cursor = response.Body.next_cursor;
+		}
+	}
+
+	[PublicAPI]
+	public async Task<CCredentials_GetSteamGuardDetails_Response?> GetSteamGuardStatus(CancellationToken cancellationToken = default) {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CCredentials_GetSteamGuardDetails_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CCredentials_GetSteamGuardDetails_Response> response;
+
+		try {
+			response = await UnifiedCredentialsService.GetSteamGuardDetails(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body : null;
+	}
+
+	[PublicAPI]
+	public async Task<string?> GetTradeToken(CancellationToken cancellationToken = default) {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CEcon_GetTradeOfferAccessToken_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CEcon_GetTradeOfferAccessToken_Response> response;
+
+		try {
+			response = await UnifiedEconService.GetTradeOfferAccessToken(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body.trade_offer_access_token : null;
+	}
+
+	public override void HandleMsg(IPacketMsg packetMsg) {
+		ArgumentNullException.ThrowIfNull(packetMsg);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		LastPacketReceived = DateTime.UtcNow;
+
+		switch (packetMsg.MsgType) {
+			case EMsg.ClientCommentNotifications:
+				ClientMsgProtobuf<CMsgClientCommentNotifications> commentNotifications = new(packetMsg, SteamKitProtobuf.Model);
+				Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, commentNotifications.Body));
+
+				break;
+			case EMsg.ClientGetClientAppList:
+				Client.PostCallback(new GetClientAppListCallback(packetMsg.SourceJobID));
+
+				break;
+			case EMsg.ClientItemAnnouncements:
+				ClientMsgProtobuf<CMsgClientItemAnnouncements> itemAnnouncements = new(packetMsg, SteamKitProtobuf.Model);
+				Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, itemAnnouncements.Body));
+
+				break;
+			case EMsg.ClientSharedLibraryLockStatus:
+				ClientMsgProtobuf<CMsgClientSharedLibraryLockStatus> sharedLibraryLockStatus = new(packetMsg, SteamKitProtobuf.Model);
+				Client.PostCallback(new SharedLibraryLockStatusCallback(packetMsg.TargetJobID, sharedLibraryLockStatus.Body));
+
+				break;
+			case EMsg.ClientUserNotifications:
+				ClientMsgProtobuf<CMsgClientUserNotifications> userNotifications = new(packetMsg, SteamKitProtobuf.Model);
+				Client.PostCallback(new UserNotificationsCallback(packetMsg.TargetJobID, userNotifications.Body));
+
+				break;
+		}
+	}
+
+	[PublicAPI]
+	public async Task<bool> JoinChatRoomGroup(ulong chatGroupID, CancellationToken cancellationToken = default) {
+		ArgumentOutOfRangeException.ThrowIfZero(chatGroupID);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return false;
+		}
+
+		CChatRoom_JoinChatRoomGroup_Request request = new() { chat_group_id = chatGroupID };
+
+		SteamUnifiedMessages.ServiceMethodResponse<CChatRoom_JoinChatRoomGroup_Response> response;
+
+		try {
+			response = await UnifiedChatRoomService.JoinChatRoomGroup(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return false;
+		}
+
+		return response.Result == EResult.OK;
+	}
+
+	[PublicAPI]
+	public async Task<bool> LeaveChatRoomGroup(ulong chatGroupID, CancellationToken cancellationToken = default) {
+		ArgumentOutOfRangeException.ThrowIfZero(chatGroupID);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return false;
+		}
+
+		CChatRoom_LeaveChatRoomGroup_Request request = new() { chat_group_id = chatGroupID };
+
+		SteamUnifiedMessages.ServiceMethodResponse<CChatRoom_LeaveChatRoomGroup_Response> response;
+
+		try {
+			response = await UnifiedChatRoomService.LeaveChatRoomGroup(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return false;
+		}
+
+		return response.Result == EResult.OK;
+	}
+
+	[PublicAPI]
+	public async Task<EResult> RedeemPoints(uint definitionID, CancellationToken cancellationToken = default) {
+		ArgumentOutOfRangeException.ThrowIfZero(definitionID);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return EResult.NoConnection;
+		}
+
+		CLoyaltyRewards_RedeemPoints_Request request = new() {
+			defid = definitionID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CLoyaltyRewards_RedeemPoints_Response> response;
+
+		try {
+			response = await UnifiedLoyaltyRewards.RedeemPoints(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	[PublicAPI]
+	public async Task<EResult> RedeemPointsForBadgeLevel(uint definitionID, byte levels = 1, CancellationToken cancellationToken = default) {
+		ArgumentOutOfRangeException.ThrowIfZero(definitionID);
+		ArgumentOutOfRangeException.ThrowIfZero(levels);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return EResult.NoConnection;
+		}
+
+		CLoyaltyRewards_RedeemPointsForBadgeLevel_Request request = new() {
+			defid = definitionID,
+			num_levels = levels
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CLoyaltyRewards_RedeemPoints_Response> response;
+
+		try {
+			response = await UnifiedLoyaltyRewards.RedeemPointsForBadgeLevel(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	[PublicAPI]
+	public async Task<bool> RemoveFriend(ulong steamID, CancellationToken cancellationToken = default) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return false;
+		}
+
+		CPlayer_RemoveFriend_Request request = new() {
+			steamid = steamID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CPlayer_RemoveFriend_Response> response;
+
+		try {
+			response = await UnifiedPlayerService.RemoveFriend(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return false;
+		}
+
+		return response.Result == EResult.OK;
+	}
+
+	internal void AckChatMessage(ulong chatGroupID, ulong chatID, uint timestamp) {
+		ArgumentOutOfRangeException.ThrowIfZero(chatGroupID);
+		ArgumentOutOfRangeException.ThrowIfZero(chatID);
+		ArgumentOutOfRangeException.ThrowIfZero(timestamp);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		CChatRoom_AckChatMessage_Notification request = new() {
+			chat_group_id = chatGroupID,
+			chat_id = chatID,
+			timestamp = timestamp
+		};
+
+		UnifiedChatRoomService.AckChatMessage(request);
+	}
+
+	internal void AckMessage(ulong steamID, uint timestamp) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		ArgumentOutOfRangeException.ThrowIfZero(timestamp);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		CFriendMessages_AckMessage_Notification request = new() {
+			steamid_partner = steamID,
+			timestamp = timestamp
+		};
+
+		UnifiedFriendMessagesService.AckMessage(request);
+	}
+
+	internal void AcknowledgeClanInvite(ulong steamID, bool acceptInvite) {
+		if ((steamID == 0) || !new SteamID(steamID).IsClanAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		ClientMsg<CMsgClientAcknowledgeClanInvite> request = new() {
+			Body = {
+				ClanID = steamID,
+				AcceptInvite = acceptInvite
+			}
+		};
+
+		Client.Send(request);
+	}
+
+	internal async Task<HashSet<ulong>?> GetFamilyGroupSteamIDs() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		SteamID? steamID = Client.SteamID;
+
+		if (steamID == null) {
+			return null;
+		}
+
+		if (steamID == 0) {
+			throw new InvalidOperationException(nameof(steamID));
+		}
+
+		CFamilyGroups_GetFamilyGroupForUser_Request request = new() {
+			include_family_group_response = true,
+			steamid = steamID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CFamilyGroups_GetFamilyGroupForUser_Response> response;
+
+		try {
+			response = await UnifiedFamilyGroups.GetFamilyGroupForUser(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		if (response.Result != EResult.OK) {
+			return null;
+		}
+
+		return response.Body.family_group?.members.Where(member => member.steamid != steamID).Select(static member => member.steamid).ToHashSet() ?? [];
+	}
+
+	internal async Task<uint?> GetLevel() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CPlayer_GetGameBadgeLevels_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CPlayer_GetGameBadgeLevels_Response> response;
+
+		try {
+			response = await UnifiedPlayerService.GetGameBadgeLevels(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		if (response.Result != EResult.OK) {
+			return null;
+		}
+
+		return response.Body.player_level;
+	}
+
+	internal async Task<HashSet<ulong>?> GetMyChatGroupIDs() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CChatRoom_GetMyChatRoomGroups_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CChatRoom_GetMyChatRoomGroups_Response> response;
+
+		try {
+			response = await UnifiedChatRoomService.GetMyChatRoomGroups(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? [.. response.Body.chat_room_groups.Select(static chatRoom => chatRoom.group_summary.chat_group_id)] : null;
+	}
+
+	internal async Task<CPrivacySettings?> GetPrivacySettings() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CPlayer_GetPrivacySettings_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CPlayer_GetPrivacySettings_Response> response;
+
+		try {
+			response = await UnifiedPlayerService.GetPrivacySettings(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body.privacy_settings : null;
+	}
+
+	internal async Task<HashSet<uint>?> GetPrivateAppIDs() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CAccountPrivateApps_GetPrivateAppList_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CAccountPrivateApps_GetPrivateAppList_Response> response;
+
+		try {
+			response = await UnifiedAccountPrivateApps.GetPrivateAppList(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? [.. response.Body.private_apps.appids.Select(static appID => (uint) appID)] : null;
+	}
+
+	internal async Task<ulong> GetServerTime() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return 0;
+		}
+
+		CTwoFactor_Time_Request request = new();
+
+		SteamUnifiedMessages.ServiceMethodResponse<CTwoFactor_Time_Response> response;
+
+		try {
+			response = await UnifiedTwoFactorService.QueryTime(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return 0;
+		}
+
+		return response.Result == EResult.OK ? response.Body.server_time : 0;
+	}
+
+	internal async Task<string?> GetTwoFactorDeviceIdentifier(ulong steamID) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CTwoFactor_Status_Request request = new() {
+			steamid = steamID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CTwoFactor_Status_Response> response;
+
+		try {
+			response = await UnifiedTwoFactorService.QueryStatus(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		return response.Result == EResult.OK ? response.Body.device_identifier : null;
+	}
+
+	internal async Task PlayGames(IReadOnlyCollection<uint> gameIDs, string? gameName = null, CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(gameIDs);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		ClientMsgProtobuf<CMsgClientGamesPlayed> request = new(EMsg.ClientGamesPlayedWithDataBlob, SteamKitProtobuf.Model) {
+			Body = {
+				// Underflow here is to be expected, this is Steam's logic
+				client_os_type = unchecked((uint) Bot.OSType)
+			}
+		};
+
+		if (!string.IsNullOrEmpty(gameName)) {
+			// If we have custom name to display, we must workaround the Steam network broken behaviour and send request on clean non-playing session
+			// This ensures that custom name will in fact display properly (if it's not omitted due to MaxGamesPlayedConcurrently, that is)
+			Client.Send(request);
+
+			await Task.Delay(Bot.CallbackSleep, cancellationToken).ConfigureAwait(false);
+
+			request.Body.games_played.Add(
+				new CMsgClientGamesPlayed.GamePlayed {
+					game_extra_info = gameName,
+					game_id = new GameID {
+						AppType = GameID.GameType.Shortcut,
+						ModID = uint.MaxValue
+					}
+				}
+			);
+		}
+
+		if (gameIDs.Count > 0) {
+			IEnumerable<uint> uniqueGameIDs = gameIDs as IReadOnlySet<uint> ?? gameIDs.Distinct();
+
+			foreach (uint gameID in uniqueGameIDs.Where(static gameID => gameID > 0)) {
+				if (request.Body.games_played.Count >= MaxGamesPlayedConcurrently) {
+					if (string.IsNullOrEmpty(gameName)) {
 						throw new ArgumentOutOfRangeException(nameof(gameIDs));
 					}
 
-					request.Body.games_played.Add(new CMsgClientGamesPlayed.GamePlayed { game_id = new GameID(gameID) });
-				}
-			}
+					// Make extra space by ditching custom gameName
+					gameName = null;
 
-			Client.Send(request);
-		}
-
-		internal async Task<RedeemGuestPassResponseCallback?> RedeemGuestPass(ulong guestPassID) {
-			if (guestPassID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(guestPassID));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return null;
-			}
-
-			ClientMsgProtobuf<CMsgClientRedeemGuestPass> request = new(EMsg.ClientRedeemGuestPass) {
-				SourceJobID = Client.GetNextJobID(),
-				Body = { guest_pass_id = guestPassID }
-			};
-
-			Client.Send(request);
-
-			try {
-				return await new AsyncJob<RedeemGuestPassResponseCallback>(Client, request.SourceJobID).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericException(e);
-
-				return null;
-			}
-		}
-
-		internal async Task<PurchaseResponseCallback?> RedeemKey(string key) {
-			if (string.IsNullOrEmpty(key)) {
-				throw new ArgumentNullException(nameof(key));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return null;
-			}
-
-			ClientMsgProtobuf<CMsgClientRegisterKey> request = new(EMsg.ClientRegisterKey) {
-				SourceJobID = Client.GetNextJobID(),
-				Body = { key = key }
-			};
-
-			Client.Send(request);
-
-			try {
-				return await new AsyncJob<PurchaseResponseCallback>(Client, request.SourceJobID).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericException(e);
-
-				return null;
-			}
-		}
-
-		internal void RequestItemAnnouncements() {
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return;
-			}
-
-			ClientMsgProtobuf<CMsgClientRequestItemAnnouncements> request = new(EMsg.ClientRequestItemAnnouncements);
-			Client.Send(request);
-		}
-
-		internal async Task<EResult> SendMessage(ulong steamID, string message) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
-
-			if (string.IsNullOrEmpty(message)) {
-				throw new ArgumentNullException(nameof(message));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return EResult.NoConnection;
-			}
-
-			CFriendMessages_SendMessage_Request request = new() {
-				chat_entry_type = (int) EChatEntryType.ChatMsg,
-				contains_bbcode = true,
-				message = message,
-				steamid = steamID
-			};
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedFriendMessagesService.SendMessage(x => x.SendMessage(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return EResult.Timeout;
-			}
-
-			return response.Result;
-		}
-
-		internal async Task<EResult> SendMessage(ulong chatGroupID, ulong chatID, string message) {
-			if (chatGroupID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatGroupID));
-			}
-
-			if (chatID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatID));
-			}
-
-			if (string.IsNullOrEmpty(message)) {
-				throw new ArgumentNullException(nameof(message));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return EResult.NoConnection;
-			}
-
-			CChatRoom_SendChatMessage_Request request = new() {
-				chat_group_id = chatGroupID,
-				chat_id = chatID,
-				message = message
-			};
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedChatRoomService.SendMessage(x => x.SendChatMessage(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return EResult.Timeout;
-			}
-
-			return response.Result;
-		}
-
-		internal async Task<EResult> SendTypingStatus(ulong steamID) {
-			if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
-				throw new ArgumentOutOfRangeException(nameof(steamID));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return EResult.NoConnection;
-			}
-
-			CFriendMessages_SendMessage_Request request = new() {
-				chat_entry_type = (int) EChatEntryType.Typing,
-				steamid = steamID
-			};
-
-			SteamUnifiedMessages.ServiceMethodResponse response;
-
-			try {
-				response = await UnifiedFriendMessagesService.SendMessage(x => x.SendMessage(request)).ToLongRunningTask().ConfigureAwait(false);
-			} catch (Exception e) {
-				ArchiLogger.LogGenericWarningException(e);
-
-				return EResult.Timeout;
-			}
-
-			return response.Result;
-		}
-
-		internal void SetCurrentMode(EUserInterfaceMode userInterfaceMode, byte chatMode = 2) {
-			if (!Enum.IsDefined(typeof(EUserInterfaceMode), userInterfaceMode)) {
-				throw new InvalidEnumArgumentException(nameof(userInterfaceMode), (int) userInterfaceMode, typeof(EUserInterfaceMode));
-			}
-
-			if (chatMode == 0) {
-				throw new ArgumentOutOfRangeException(nameof(chatMode));
-			}
-
-			if (Client == null) {
-				throw new InvalidOperationException(nameof(Client));
-			}
-
-			if (!Client.IsConnected) {
-				return;
-			}
-
-			ClientMsgProtobuf<CMsgClientUIMode> request = new(EMsg.ClientCurrentUIMode) {
-				Body = {
-					uimode = (uint) userInterfaceMode,
-					chat_mode = chatMode
-				}
-			};
-
-			Client.Send(request);
-		}
-
-		[PublicAPI]
-		public enum EUserInterfaceMode : byte {
-			Default = 0,
-			BigPicture = 1,
-			Mobile = 2
-		}
-
-		internal sealed class PlayingSessionStateCallback : CallbackMsg {
-			internal readonly bool PlayingBlocked;
-
-			internal PlayingSessionStateCallback(JobID jobID, CMsgClientPlayingSessionState msg) {
-				if (jobID == null) {
-					throw new ArgumentNullException(nameof(jobID));
+					request.Body.games_played.RemoveAt(0);
 				}
 
-				if (msg == null) {
-					throw new ArgumentNullException(nameof(msg));
-				}
-
-				JobID = jobID;
-				PlayingBlocked = msg.playing_blocked;
+				request.Body.games_played.Add(new CMsgClientGamesPlayed.GamePlayed { game_id = new GameID(gameID) });
 			}
 		}
 
-		internal sealed class RedeemGuestPassResponseCallback : CallbackMsg {
-			internal readonly EResult Result;
+		Client.Send(request);
+	}
 
-			internal RedeemGuestPassResponseCallback(JobID jobID, CMsgClientRedeemGuestPassResponse msg) {
-				if (jobID == null) {
-					throw new ArgumentNullException(nameof(jobID));
-				}
+	internal async Task<SteamApps.RedeemGuestPassResponseCallback?> RedeemGuestPass(ulong guestPassID) {
+		ArgumentOutOfRangeException.ThrowIfZero(guestPassID);
 
-				if (msg == null) {
-					throw new ArgumentNullException(nameof(msg));
-				}
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
 
-				JobID = jobID;
-				Result = (EResult) msg.eresult;
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		ClientMsgProtobuf<CMsgClientRedeemGuestPass> request = new(EMsg.ClientRedeemGuestPass, SteamKitProtobuf.Model) {
+			SourceJobID = Client.GetNextJobID(),
+			Body = { guest_pass_id = guestPassID }
+		};
+
+		Client.Send(request);
+
+		try {
+			return await new AsyncJob<SteamApps.RedeemGuestPassResponseCallback>(Client, request.SourceJobID).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericException(e);
+
+			return null;
+		}
+	}
+
+	internal async Task<CStore_RegisterCDKey_Response?> RedeemKey(string key) {
+		ArgumentException.ThrowIfNullOrEmpty(key);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return null;
+		}
+
+		CStore_RegisterCDKey_Request request = new() {
+			activation_code = key,
+			is_request_from_client = true
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CStore_RegisterCDKey_Response> response;
+
+		try {
+			response = await UnifiedStoreService.RegisterCDKey(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return null;
+		}
+
+		// We want to return the response even with failed EResult
+		return response.Body;
+	}
+
+	internal async Task<EResult> RemoveLicenseForApp(uint appID) {
+		ArgumentOutOfRangeException.ThrowIfZero(appID);
+
+		CUserAccount_CancelLicenseForApp_Request request = new() {
+			appid = appID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CUserAccount_CancelLicenseForApp_Response> response;
+
+		try {
+			response = await UnifiedUserAccountService.CancelLicenseForApp(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	internal void RequestItemAnnouncements() {
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		ClientMsgProtobuf<CMsgClientRequestItemAnnouncements> request = new(EMsg.ClientRequestItemAnnouncements, SteamKitProtobuf.Model);
+		Client.Send(request);
+	}
+
+	internal void SendClientAppListResponse(JobID jobID) {
+		ArgumentNullException.ThrowIfNull(jobID);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		ClientMsgProtobuf<CMsgClientGetClientAppListResponse> request = new(EMsg.ClientGetClientAppListResponse, SteamKitProtobuf.Model) {
+			TargetJobID = jobID
+		};
+
+		Client.Send(request);
+	}
+
+	internal async Task<EResult> SendMessage(ulong steamID, string message) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		ArgumentException.ThrowIfNullOrEmpty(message);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return EResult.NoConnection;
+		}
+
+		CFriendMessages_SendMessage_Request request = new() {
+			chat_entry_type = (int) EChatEntryType.ChatMsg,
+			contains_bbcode = true,
+			message = message,
+			steamid = steamID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CFriendMessages_SendMessage_Response> response;
+
+		try {
+			response = await UnifiedFriendMessagesService.SendMessage(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	internal async Task<EResult> SendMessage(ulong chatGroupID, ulong chatID, string message) {
+		ArgumentOutOfRangeException.ThrowIfZero(chatGroupID);
+		ArgumentOutOfRangeException.ThrowIfZero(chatID);
+		ArgumentException.ThrowIfNullOrEmpty(message);
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return EResult.NoConnection;
+		}
+
+		CChatRoom_SendChatMessage_Request request = new() {
+			chat_group_id = chatGroupID,
+			chat_id = chatID,
+			message = message
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CChatRoom_SendChatMessage_Response> response;
+
+		try {
+			response = await UnifiedChatRoomService.SendChatMessage(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	internal async Task<EResult> SendTypingStatus(ulong steamID) {
+		if ((steamID == 0) || !new SteamID(steamID).IsIndividualAccount) {
+			throw new ArgumentOutOfRangeException(nameof(steamID));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return EResult.NoConnection;
+		}
+
+		CFriendMessages_SendMessage_Request request = new() {
+			chat_entry_type = (int) EChatEntryType.Typing,
+			steamid = steamID
+		};
+
+		SteamUnifiedMessages.ServiceMethodResponse<CFriendMessages_SendMessage_Response> response;
+
+		try {
+			response = await UnifiedFriendMessagesService.SendMessage(request).ToLongRunningTask().ConfigureAwait(false);
+		} catch (Exception e) {
+			ArchiLogger.LogGenericWarningException(e);
+
+			return EResult.Timeout;
+		}
+
+		return response.Result;
+	}
+
+	internal void SetPersonaState(EPersonaState state, EPersonaStateFlag flags) {
+		if (!Enum.IsDefined(state)) {
+			throw new InvalidEnumArgumentException(nameof(state), (int) state, typeof(EPersonaState));
+		}
+
+		if (flags < 0) {
+			throw new InvalidEnumArgumentException(nameof(flags), (int) flags, typeof(EPersonaStateFlag));
+		}
+
+		if (Client == null) {
+			throw new InvalidOperationException(nameof(Client));
+		}
+
+		if (!Client.IsConnected) {
+			return;
+		}
+
+		ClientMsgProtobuf<CMsgClientChangeStatus> request = new(EMsg.ClientChangeStatus, SteamKitProtobuf.Model) {
+			Body = {
+				persona_state = (uint) state,
+				persona_state_flags = (uint) flags
 			}
-		}
+		};
 
-		internal sealed class SharedLibraryLockStatusCallback : CallbackMsg {
-			internal readonly ulong LibraryLockedBySteamID;
-
-			internal SharedLibraryLockStatusCallback(JobID jobID, CMsgClientSharedLibraryLockStatus msg) {
-				if (jobID == null) {
-					throw new ArgumentNullException(nameof(jobID));
-				}
-
-				if (msg == null) {
-					throw new ArgumentNullException(nameof(msg));
-				}
-
-				JobID = jobID;
-
-				if (msg.own_library_locked_by == 0) {
-					return;
-				}
-
-				LibraryLockedBySteamID = new SteamID(msg.own_library_locked_by, EUniverse.Public, EAccountType.Individual);
-			}
-		}
-
-		internal sealed class VanityURLChangedCallback : CallbackMsg {
-			internal readonly string VanityURL;
-
-			internal VanityURLChangedCallback(JobID jobID, CMsgClientVanityURLChangedNotification msg) {
-				if (jobID == null) {
-					throw new ArgumentNullException(nameof(jobID));
-				}
-
-				if (msg == null) {
-					throw new ArgumentNullException(nameof(msg));
-				}
-
-				JobID = jobID;
-				VanityURL = msg.vanity_url;
-			}
-		}
-
-		internal enum EPrivacySetting : byte {
-			Unknown,
-			Private,
-			FriendsOnly,
-			Public
-		}
+		Client.Send(request);
 	}
 }

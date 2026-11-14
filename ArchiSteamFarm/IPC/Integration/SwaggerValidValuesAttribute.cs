@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,38 +22,50 @@
 // limitations under the License.
 
 using System;
-using System.Linq;
+using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Nodes;
 using JetBrains.Annotations;
-using Microsoft.OpenApi.Any;
-using Microsoft.OpenApi.Extensions;
-using Microsoft.OpenApi.Models;
+using Microsoft.OpenApi;
 
-namespace ArchiSteamFarm.IPC.Integration {
-	[PublicAPI]
-	public sealed class SwaggerValidValuesAttribute : CustomSwaggerAttribute {
-		public int[]? ValidIntValues { get; set; }
-		public string[]? ValidStringValues { get; set; }
+namespace ArchiSteamFarm.IPC.Integration;
 
-		public override void Apply(OpenApiSchema schema) {
-			if (schema == null) {
-				throw new ArgumentNullException(nameof(schema));
-			}
+[PublicAPI]
+public sealed class SwaggerValidValuesAttribute : CustomSwaggerAttribute {
+	private const string ExtensionName = "x-valid-values";
 
-			OpenApiArray validValues = new();
+	public int[]? ValidIntValues { get; init; }
+	public string[]? ValidStringValues { get; init; }
 
-			if (ValidIntValues != null) {
-				validValues.AddRange(ValidIntValues.Select(type => new OpenApiInteger(type)));
-			}
+	[UnconditionalSuppressMessage("AssemblyLoadTrimming", "IL2026:RequiresUnreferencedCode", Justification = "We're not creating json values with non-primitive types")]
+	public override void Apply(OpenApiSchema schema) {
+		ArgumentNullException.ThrowIfNull(schema);
 
-			if (ValidStringValues != null) {
-				validValues.AddRange(ValidStringValues.Select(type => new OpenApiString(type)));
-			}
+		JsonArray validValues = [];
 
-			if (schema.Items is { Reference: null }) {
-				schema.Items.AddExtension("x-valid-values", validValues);
-			} else {
-				schema.AddExtension("x-valid-values", validValues);
+		if (ValidIntValues != null) {
+			foreach (int value in ValidIntValues) {
+				validValues.Add(JsonValue.Create(value));
 			}
 		}
+
+		if (ValidStringValues != null) {
+			foreach (string value in ValidStringValues) {
+				validValues.Add(JsonValue.Create(value));
+			}
+		}
+
+		if (schema.Items != null) {
+			if (schema.Items is OpenApiSchema items) {
+				items.AddExtension(ExtensionName, new JsonNodeExtension(validValues));
+			} else if (schema.Items.Extensions != null) {
+				schema.Items.Extensions[ExtensionName] = new JsonNodeExtension(validValues);
+			} else {
+				throw new InvalidOperationException(nameof(schema.Items));
+			}
+
+			return;
+		}
+
+		schema.AddExtension(ExtensionName, new JsonNodeExtension(validValues));
 	}
 }

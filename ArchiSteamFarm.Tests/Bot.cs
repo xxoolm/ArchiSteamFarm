@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,497 +21,570 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#if NETFRAMEWORK
-using ArchiSteamFarm.Compatibility;
-#endif
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using System.Reflection;
+using System.Text.Json.Nodes;
+using System.Threading.Tasks;
+using ArchiSteamFarm.Core;
+using ArchiSteamFarm.Helpers.Json;
+using ArchiSteamFarm.Steam;
 using ArchiSteamFarm.Steam.Data;
+using ArchiSteamFarm.Steam.Storage;
+using ArchiSteamFarm.Storage;
+using JetBrains.Annotations;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using static ArchiSteamFarm.Steam.Bot;
 
-namespace ArchiSteamFarm.Tests {
-	[TestClass]
-	public sealed class Bot {
-		[TestMethod]
-		public void MaxItemsBarelyEnoughForOneSet() {
-			const uint relevantAppID = 42;
+namespace ArchiSteamFarm.Tests;
 
-			Dictionary<uint, byte> itemsPerSet = new() {
-				{ relevantAppID, MinCardsPerBadge },
-				{ 43, MinCardsPerBadge + 1 }
-			};
+#pragma warning disable CA1812 // False positive, the class is used during MSTest
+[TestClass]
+internal sealed class Bot : TestBase {
+	[UsedImplicitly]
+	public Bot(TestContext testContext) : base(testContext) => ArgumentNullException.ThrowIfNull(testContext);
 
-			HashSet<Asset> items = new();
+	internal static Steam.Bot GenerateBot(string botName = "Test") {
+		ArgumentException.ThrowIfNullOrEmpty(botName);
 
-			foreach ((uint appID, byte cards) in itemsPerSet) {
-				for (byte i = 1; i <= cards; i++) {
-					items.Add(CreateCard(i, appID));
-				}
+		ConstructorInfo? constructor = typeof(Steam.Bot).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, [typeof(string), typeof(BotConfig), typeof(BotDatabase)]);
+
+		if (constructor == null) {
+			throw new InvalidOperationException(nameof(constructor));
+		}
+
+		JsonObject emptyObject = new();
+
+		BotConfig? botConfig = emptyObject.ToJsonObject<BotConfig>();
+
+		if (botConfig == null) {
+			throw new InvalidOperationException(nameof(botConfig));
+		}
+
+		BotDatabase? botDatabase = emptyObject.ToJsonObject<BotDatabase>();
+
+		if (botDatabase == null) {
+			throw new InvalidOperationException(nameof(botDatabase));
+		}
+
+		ASF.GlobalDatabase ??= emptyObject.ToJsonObject<GlobalDatabase>();
+
+		return constructor.Invoke([botName, botConfig, botDatabase]) is Steam.Bot result ? result : throw new InvalidOperationException(nameof(result));
+	}
+
+	[DataRow(" ")]
+	[DataRow("\t")]
+	[DataRow("\r\n")]
+	[TestMethod]
+	internal async Task IgnoresCommandPrefixFollowedByWhitespace(string whitespace) {
+		ArgumentNullException.ThrowIfNull(whitespace);
+
+		const ulong steamID = 76561197960265729;
+
+		string? commandPrefix = ASF.GlobalConfig != null ? ASF.GlobalConfig.CommandPrefix : GlobalConfig.DefaultCommandPrefix;
+		string message = $"{commandPrefix}{whitespace}";
+
+		Steam.Bot bot = GenerateBot();
+
+		await bot.Commands.HandleMessage(steamID, message, CancellationToken).ConfigureAwait(false);
+		await bot.Commands.HandleMessage(1, 1, steamID, message, CancellationToken).ConfigureAwait(false);
+	}
+
+	[TestMethod]
+	internal void MaxItemsBarelyEnoughForOneSet() {
+		const uint relevantAppID = 42;
+
+		Dictionary<uint, byte> itemsPerSet = new() {
+			{ relevantAppID, MinCardsPerBadge },
+			{ 43, MinCardsPerBadge + 1 }
+		};
+
+		HashSet<Asset> items = [];
+
+		foreach ((uint appID, byte cards) in itemsPerSet) {
+			for (byte i = 1; i <= cards; i++) {
+				items.Add(CreateCard(i, realAppID: appID));
 			}
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, itemsPerSet, MinCardsPerBadge);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = items.Where(item => item.RealAppID == relevantAppID)
-				.GroupBy(item => (item.RealAppID, item.ContextID, item.ClassID))
-				.ToDictionary(grouping => grouping.Key, grouping => (uint) grouping.Sum(item => item.Amount));
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
 		}
 
-		[TestMethod]
-		[ExpectedException(typeof(ArgumentOutOfRangeException))]
-		public void MaxItemsTooSmall() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID),
-				CreateCard(2, appID)
-			};
-
-			GetItemsForFullBadge(items, 2, appID, MinCardsPerBadge - 1);
-
-			Assert.Fail();
-		}
-
-		[TestMethod]
-		public void MoreCardsThanNeeded() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID),
-				CreateCard(1, appID),
-				CreateCard(2, appID),
-				CreateCard(3, appID)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 3), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void MultipleSets() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID),
-				CreateCard(1, appID),
-				CreateCard(2, appID),
-				CreateCard(2, appID)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 2 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 2 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void MultipleSetsDifferentAmount() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, 2),
-				CreateCard(2, appID),
-				CreateCard(2, appID)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 2 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 2 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void MutliRarityAndType() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, type: Asset.EType.TradingCard, rarity: Asset.ERarity.Common),
-				CreateCard(2, appID, type: Asset.EType.TradingCard, rarity: Asset.ERarity.Common),
-
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Uncommon),
-				CreateCard(2, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Uncommon),
-
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Rare),
-				CreateCard(2, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Rare),
-
-				// for better readability and easier verification when thinking about this test the items that shall be selected for sending are the ones below this comment
-				CreateCard(1, appID, type: Asset.EType.TradingCard, rarity: Asset.ERarity.Uncommon),
-				CreateCard(2, appID, type: Asset.EType.TradingCard, rarity: Asset.ERarity.Uncommon),
-				CreateCard(3, appID, type: Asset.EType.TradingCard, rarity: Asset.ERarity.Uncommon),
-
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Common),
-				CreateCard(3, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Common),
-				CreateCard(7, appID, type: Asset.EType.FoilTradingCard, rarity: Asset.ERarity.Common),
-
-				CreateCard(2, appID, type: Asset.EType.Unknown, rarity: Asset.ERarity.Rare),
-				CreateCard(3, appID, type: Asset.EType.Unknown, rarity: Asset.ERarity.Rare),
-				CreateCard(4, appID, type: Asset.EType.Unknown, rarity: Asset.ERarity.Rare)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 2 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 2 },
-				{ (appID, Asset.SteamCommunityContextID, 3), 3 },
-				{ (appID, Asset.SteamCommunityContextID, 4), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 7), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void NotAllCardsPresent() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID),
-				CreateCard(2, appID)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new(0);
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OneSet() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID),
-				CreateCard(2, appID)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherAppIDFullSets() {
-			const uint appID0 = 42;
-			const uint appID1 = 43;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID0),
-				CreateCard(1, appID1)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(
-				items, new Dictionary<uint, byte> {
-					{ appID0, 1 },
-					{ appID1, 1 }
-				}
-			);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID0, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID1, Asset.SteamCommunityContextID, 1), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherAppIDNoSets() {
-			const uint appID0 = 42;
-			const uint appID1 = 43;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID0),
-				CreateCard(1, appID1)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(
-				items, new Dictionary<uint, byte> {
-					{ appID0, 2 },
-					{ appID1, 2 }
-				}
-			);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new(0);
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherAppIDOneSet() {
-			const uint appID0 = 42;
-			const uint appID1 = 43;
-			const uint appID2 = 44;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID0),
-				CreateCard(2, appID0),
-
-				CreateCard(1, appID1),
-				CreateCard(2, appID1),
-				CreateCard(3, appID1)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(
-				items, new Dictionary<uint, byte> {
-					{ appID0, 3 },
-					{ appID1, 3 },
-					{ appID2, 3 }
-				}
-			);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID1, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID1, Asset.SteamCommunityContextID, 2), 1 },
-				{ (appID1, Asset.SteamCommunityContextID, 3), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherRarityFullSets() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, rarity: Asset.ERarity.Common),
-				CreateCard(1, appID, rarity: Asset.ERarity.Rare)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 1, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 2 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherRarityNoSets() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, rarity: Asset.ERarity.Common),
-				CreateCard(1, appID, rarity: Asset.ERarity.Rare)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new(0);
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherRarityOneSet() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, rarity: Asset.ERarity.Common),
-				CreateCard(2, appID, rarity: Asset.ERarity.Common),
-				CreateCard(1, appID, rarity: Asset.ERarity.Uncommon),
-				CreateCard(2, appID, rarity: Asset.ERarity.Uncommon),
-				CreateCard(3, appID, rarity: Asset.ERarity.Uncommon)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 3), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherTypeFullSets() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, type: Asset.EType.TradingCard),
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 1, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 2 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherTypeNoSets() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, type: Asset.EType.TradingCard),
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new(0);
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void OtherTypeOneSet() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID, type: Asset.EType.TradingCard),
-				CreateCard(2, appID, type: Asset.EType.TradingCard),
-				CreateCard(1, appID, type: Asset.EType.FoilTradingCard),
-				CreateCard(2, appID, type: Asset.EType.FoilTradingCard),
-				CreateCard(3, appID, type: Asset.EType.FoilTradingCard)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 2), 1 },
-				{ (appID, Asset.SteamCommunityContextID, 3), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void TooHighAmount() {
-			const uint appID0 = 42;
-
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID0, 2),
-				CreateCard(2, appID0)
-			};
-
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID0);
-
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult = new() {
-				{ (appID0, Asset.SteamCommunityContextID, 1), 1 },
-				{ (appID0, Asset.SteamCommunityContextID, 2), 1 }
-			};
-
-			AssertResultMatchesExpectation(expectedResult, itemsToSend);
-		}
-
-		[TestMethod]
-		public void TooManyCardsForSingleTrade() {
-			const uint appID = 42;
-
-			HashSet<Asset> items = new();
-
-			for (byte i = 0; i < Steam.Exchange.Trading.MaxItemsPerTrade; i++) {
-				items.Add(CreateCard(1, appID));
-				items.Add(CreateCard(2, appID));
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, itemsPerSet, MinCardsPerBadge);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = items.Where(static item => item.RealAppID == relevantAppID).GroupBy(static item => (item.AppID, item.ContextID, item.ClassID, item.RealAppID, item.Type, item.Rarity)).ToDictionary(static group => group.Key, static group => (uint) group.Sum(static item => item.Amount));
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void MaxItemsTooSmall() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID),
+			CreateCard(2, realAppID: appID)
+		];
+
+		Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => GetItemsForFullBadge(items, 2, appID, MinCardsPerBadge - 1));
+	}
+
+	[TestMethod]
+	internal void MoreCardsThanNeeded() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID),
+			CreateCard(1, realAppID: appID),
+			CreateCard(2, realAppID: appID),
+			CreateCard(3, realAppID: appID)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void MultipleSets() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID),
+			CreateCard(1, realAppID: appID),
+			CreateCard(2, realAppID: appID),
+			CreateCard(2, realAppID: appID)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 2 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Common), 2 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void MultipleSetsDifferentAmount() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, amount: 2, realAppID: appID),
+			CreateCard(2, realAppID: appID),
+			CreateCard(2, realAppID: appID)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 2 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Common), 2 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void MutliRarityAndType() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, type: EAssetType.TradingCard, rarity: EAssetRarity.Common),
+			CreateCard(2, realAppID: appID, type: EAssetType.TradingCard, rarity: EAssetRarity.Common),
+
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Uncommon),
+			CreateCard(2, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Uncommon),
+
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Rare),
+			CreateCard(2, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Rare),
+
+			// for better readability and easier verification when thinking about this test the items that shall be selected for sending are the ones below this comment
+			CreateCard(1, realAppID: appID, type: EAssetType.TradingCard, rarity: EAssetRarity.Uncommon),
+			CreateCard(2, realAppID: appID, type: EAssetType.TradingCard, rarity: EAssetRarity.Uncommon),
+			CreateCard(3, realAppID: appID, type: EAssetType.TradingCard, rarity: EAssetRarity.Uncommon),
+
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Common),
+			CreateCard(3, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Common),
+			CreateCard(7, realAppID: appID, type: EAssetType.FoilTradingCard, rarity: EAssetRarity.Common),
+
+			CreateCard(2, realAppID: appID, type: EAssetType.Unknown, rarity: EAssetRarity.Rare),
+			CreateCard(3, realAppID: appID, type: EAssetType.Unknown, rarity: EAssetRarity.Rare),
+			CreateCard(4, realAppID: appID, type: EAssetType.Unknown, rarity: EAssetRarity.Rare)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 7, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.Unknown, EAssetRarity.Rare), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.Unknown, EAssetRarity.Rare), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 4, appID, EAssetType.Unknown, EAssetRarity.Rare), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void NotAllCardsPresent() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID),
+			CreateCard(2, realAppID: appID)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new(0);
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OneSet() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID),
+			CreateCard(2, realAppID: appID)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherAppIDFullSets() {
+		const uint appID0 = 42;
+		const uint appID1 = 43;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID0),
+			CreateCard(1, realAppID: appID1)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(
+			items, new Dictionary<uint, byte> {
+				{ appID0, 1 },
+				{ appID1, 1 }
 			}
+		);
 
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID0, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID1, EAssetType.TradingCard, EAssetRarity.Common), 1 }
+		};
 
-			Assert.IsTrue(itemsToSend.Count <= Steam.Exchange.Trading.MaxItemsPerTrade);
-		}
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
 
-		[TestMethod]
-		public void TooManyCardsForSingleTradeMultipleAppIDs() {
-			const uint appID0 = 42;
-			const uint appID1 = 43;
+	[TestMethod]
+	internal void OtherAppIDNoSets() {
+		const uint appID0 = 42;
+		const uint appID1 = 43;
 
-			HashSet<Asset> items = new();
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID0),
+			CreateCard(1, realAppID: appID1)
+		];
 
-			for (byte i = 0; i < 100; i++) {
-				items.Add(CreateCard(1, appID0));
-				items.Add(CreateCard(2, appID0));
-				items.Add(CreateCard(1, appID1));
-				items.Add(CreateCard(2, appID1));
-			}
-
-			Dictionary<uint, byte> itemsPerSet = new() {
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(
+			items, new Dictionary<uint, byte> {
 				{ appID0, 2 },
 				{ appID1, 2 }
-			};
+			}
+		);
 
-			HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, itemsPerSet);
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new(0);
 
-			Assert.IsTrue(itemsToSend.Count <= Steam.Exchange.Trading.MaxItemsPerTrade);
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherAppIDOneSet() {
+		const uint appID0 = 42;
+		const uint appID1 = 43;
+		const uint appID2 = 44;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID0),
+			CreateCard(2, realAppID: appID0),
+
+			CreateCard(1, realAppID: appID1),
+			CreateCard(2, realAppID: appID1),
+			CreateCard(3, realAppID: appID1)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(
+			items, new Dictionary<uint, byte> {
+				{ appID0, 3 },
+				{ appID1, 3 },
+				{ appID2, 3 }
+			}
+		);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID1, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID1, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID1, EAssetType.TradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherRarityFullSets() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Common),
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Rare)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 1, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Rare), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherRarityNoSets() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Common),
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Rare)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new(0);
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherRarityOneSet() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Common),
+			CreateCard(2, realAppID: appID, rarity: EAssetRarity.Common),
+			CreateCard(1, realAppID: appID, rarity: EAssetRarity.Uncommon),
+			CreateCard(2, realAppID: appID, rarity: EAssetRarity.Uncommon),
+			CreateCard(3, realAppID: appID, rarity: EAssetRarity.Uncommon)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.TradingCard, EAssetRarity.Uncommon), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherTypeFullSets() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, type: EAssetType.TradingCard),
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 1, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherTypeNoSets() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, type: EAssetType.TradingCard),
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new(0);
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void OtherTypeOneSet() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID, type: EAssetType.TradingCard),
+			CreateCard(2, realAppID: appID, type: EAssetType.TradingCard),
+			CreateCard(1, realAppID: appID, type: EAssetType.FoilTradingCard),
+			CreateCard(2, realAppID: appID, type: EAssetType.FoilTradingCard),
+			CreateCard(3, realAppID: appID, type: EAssetType.FoilTradingCard)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 3, appID);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 3, appID, EAssetType.FoilTradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[DataRow(" ")]
+	[DataRow("\t")]
+	[DataRow("\r\n")]
+	[TestMethod]
+	internal async Task ResponseIgnoresWhitespaceOnlyCommands(string message) {
+		ArgumentNullException.ThrowIfNull(message);
+
+		Steam.Bot bot = GenerateBot();
+
+		Assert.IsNull(await bot.Commands.Response(EBotUserAccess.Owner, message, cancellationToken: CancellationToken).ConfigureAwait(false));
+	}
+
+	[TestMethod]
+	internal void SetUserInputAcceptsQrCodeLoginChoice() {
+		Steam.Bot bot = GenerateBot();
+
+		Assert.IsTrue(bot.SetUserInput(EUserInputType.QrCodeLogin, "Y"));
+		Assert.IsTrue(bot.SetUserInput(EUserInputType.QrCodeLogin, "n"));
+		Assert.IsFalse(bot.SetUserInput(EUserInputType.QrCodeLogin, "maybe"));
+	}
+
+	[TestMethod]
+	internal void TooHighAmount() {
+		const uint appID0 = 42;
+
+		HashSet<Asset> items = [
+			CreateCard(1, amount: 2, realAppID: appID0),
+			CreateCard(2, realAppID: appID0)
+		];
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID0);
+
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult = new() {
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 1, appID0, EAssetType.TradingCard, EAssetRarity.Common), 1 },
+			{ (Asset.SteamAppID, Asset.SteamCommunityContextID, 2, appID0, EAssetType.TradingCard, EAssetRarity.Common), 1 }
+		};
+
+		AssertResultMatchesExpectation(expectedResult, itemsToSend);
+	}
+
+	[TestMethod]
+	internal void TooManyCardsForSingleTrade() {
+		const uint appID = 42;
+
+		HashSet<Asset> items = [];
+
+		for (byte i = 0; i < Steam.Exchange.Trading.MaxItemsPerTrade; i++) {
+			items.Add(CreateCard(1, realAppID: appID));
+			items.Add(CreateCard(2, realAppID: appID));
 		}
 
-		[TestMethod]
-		[ExpectedException(typeof(InvalidOperationException))]
-		public void TooManyCardsPerSet() {
-			const uint appID0 = 42;
-			const uint appID1 = 43;
-			const uint appID2 = 44;
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, 2, appID);
 
-			HashSet<Asset> items = new() {
-				CreateCard(1, appID0),
-				CreateCard(2, appID0),
-				CreateCard(3, appID0),
-				CreateCard(4, appID0)
-			};
+		Assert.IsLessThanOrEqualTo(Steam.Exchange.Trading.MaxItemsPerTrade, itemsToSend.Count);
+	}
 
-			GetItemsForFullBadge(
+	[TestMethod]
+	internal void TooManyCardsForSingleTradeMultipleAppIDs() {
+		const uint appID0 = 42;
+		const uint appID1 = 43;
+
+		HashSet<Asset> items = [];
+
+		for (byte i = 0; i < 100; i++) {
+			items.Add(CreateCard(1, realAppID: appID0));
+			items.Add(CreateCard(2, realAppID: appID0));
+			items.Add(CreateCard(1, realAppID: appID1));
+			items.Add(CreateCard(2, realAppID: appID1));
+		}
+
+		Dictionary<uint, byte> itemsPerSet = new() {
+			{ appID0, 2 },
+			{ appID1, 2 }
+		};
+
+		HashSet<Asset> itemsToSend = GetItemsForFullBadge(items, itemsPerSet);
+
+		Assert.IsLessThanOrEqualTo(Steam.Exchange.Trading.MaxItemsPerTrade, itemsToSend.Count);
+	}
+
+	[TestMethod]
+	internal void TooManyCardsPerSet() {
+		const uint appID0 = 42;
+		const uint appID1 = 43;
+		const uint appID2 = 44;
+
+		HashSet<Asset> items = [
+			CreateCard(1, realAppID: appID0),
+			CreateCard(2, realAppID: appID0),
+			CreateCard(3, realAppID: appID0),
+			CreateCard(4, realAppID: appID0)
+		];
+
+		Assert.ThrowsExactly<InvalidOperationException>(() => GetItemsForFullBadge(
 				items, new Dictionary<uint, byte> {
 					{ appID0, 3 },
 					{ appID1, 3 },
 					{ appID2, 3 }
 				}
-			);
+			)
+		);
+	}
 
-			Assert.Fail();
-		}
+	private static void AssertResultMatchesExpectation(Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), uint> expectedResult, IReadOnlyCollection<Asset> itemsToSend) {
+		ArgumentNullException.ThrowIfNull(expectedResult);
+		ArgumentNullException.ThrowIfNull(itemsToSend);
 
-		private static void AssertResultMatchesExpectation(IReadOnlyDictionary<(uint RealAppID, ulong ContextID, ulong ClassID), uint> expectedResult, IReadOnlyCollection<Asset> itemsToSend) {
-			if (expectedResult == null) {
-				throw new ArgumentNullException(nameof(expectedResult));
-			}
+		Dictionary<(uint AppID, ulong ContextID, ulong ClassID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), long> realResult = itemsToSend.GroupBy(static asset => (asset.AppID, asset.ContextID, asset.ClassID, asset.RealAppID, asset.Type, asset.Rarity)).ToDictionary(static group => group.Key, static group => group.Sum(static asset => asset.Amount));
+		Assert.HasCount(expectedResult.Count, realResult);
+		Assert.IsTrue(expectedResult.All(expectation => realResult.TryGetValue(expectation.Key, out long reality) && (expectation.Value == reality)));
+	}
 
-			if (itemsToSend == null) {
-				throw new ArgumentNullException(nameof(itemsToSend));
-			}
+	private static Asset CreateCard(ulong classID, ulong instanceID = 0, uint amount = 1, bool marketable = false, bool tradable = false, uint realAppID = Asset.SteamAppID, EAssetType type = EAssetType.TradingCard, EAssetRarity rarity = EAssetRarity.Common) => new(Asset.SteamAppID, Asset.SteamCommunityContextID, classID, amount, new InventoryDescription(Asset.SteamAppID, classID, instanceID, marketable, tradable, realAppID, type, rarity));
 
-			Dictionary<(uint RealAppID, ulong ContextID, ulong ClassID), long> realResult = itemsToSend.GroupBy(asset => (asset.RealAppID, asset.ContextID, asset.ClassID)).ToDictionary(group => group.Key, group => group.Sum(asset => asset.Amount));
-			Assert.AreEqual(expectedResult.Count, realResult.Count);
-			Assert.IsTrue(expectedResult.All(expectation => realResult.TryGetValue(expectation.Key, out long reality) && (expectation.Value == reality)));
-		}
+	private static HashSet<Asset> GetItemsForFullBadge(IReadOnlyCollection<Asset> inventory, byte cardsPerSet, uint appID, ushort maxItems = Steam.Exchange.Trading.MaxItemsPerTrade) => GetItemsForFullBadge(inventory, new Dictionary<uint, byte> { { appID, cardsPerSet } }, maxItems);
 
-		private static Asset CreateCard(ulong classID, uint realAppID, uint amount = 1, Asset.EType type = Asset.EType.TradingCard, Asset.ERarity rarity = Asset.ERarity.Common) => new(Asset.SteamAppID, Asset.SteamCommunityContextID, classID, amount, realAppID: realAppID, type: type, rarity: rarity);
+	private static HashSet<Asset> GetItemsForFullBadge(IReadOnlyCollection<Asset> inventory, [SuppressMessage("ReSharper", "SuggestBaseTypeForParameter")] Dictionary<uint, byte> cardsPerSet, ushort maxItems = Steam.Exchange.Trading.MaxItemsPerTrade) {
+		Dictionary<(uint AppID, ulong ContextID, uint RealAppID, EAssetType Type, EAssetRarity Rarity), List<uint>> inventorySets = Steam.Exchange.Trading.GetInventorySets(inventory);
 
-		private static HashSet<Asset> GetItemsForFullBadge(IReadOnlyCollection<Asset> inventory, byte cardsPerSet, uint appID, ushort maxItems = Steam.Exchange.Trading.MaxItemsPerTrade) => GetItemsForFullBadge(inventory, new Dictionary<uint, byte> { { appID, cardsPerSet } }, maxItems);
-
-		private static HashSet<Asset> GetItemsForFullBadge(IReadOnlyCollection<Asset> inventory, IDictionary<uint, byte> cardsPerSet, ushort maxItems = Steam.Exchange.Trading.MaxItemsPerTrade) {
-			Dictionary<(uint RealAppID, Asset.EType Type, Asset.ERarity Rarity), List<uint>> inventorySets = Steam.Exchange.Trading.GetInventorySets(inventory);
-
-			return GetItemsForFullSets(inventory, inventorySets.ToDictionary(kv => kv.Key, kv => (SetsToExtract: inventorySets[kv.Key][0], cardsPerSet[kv.Key.RealAppID])), maxItems).ToHashSet();
-		}
+		return [.. GetItemsForFullSets(inventory, inventorySets.ToDictionary(static kv => kv.Key, kv => (SetsToExtract: inventorySets[kv.Key][0], cardsPerSet[kv.Key.RealAppID])), maxItems)];
 	}
 }
+#pragma warning restore CA1812 // False positive, the class is used during MSTest

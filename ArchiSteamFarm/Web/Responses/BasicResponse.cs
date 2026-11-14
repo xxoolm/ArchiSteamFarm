@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,29 +26,26 @@ using System.Net;
 using System.Net.Http;
 using JetBrains.Annotations;
 
-namespace ArchiSteamFarm.Web.Responses {
-	public class BasicResponse {
-		[PublicAPI]
-		public HttpStatusCode StatusCode { get; }
+namespace ArchiSteamFarm.Web.Responses;
 
-		internal readonly Uri FinalUri;
+public class BasicResponse {
+	[PublicAPI]
+	public Uri FinalUri { get; }
 
-		internal BasicResponse(HttpResponseMessage httpResponseMessage) {
-			if (httpResponseMessage == null) {
-				throw new ArgumentNullException(nameof(httpResponseMessage));
-			}
+	[PublicAPI]
+	public HttpStatusCode StatusCode { get; }
 
-			FinalUri = httpResponseMessage.Headers.Location ?? httpResponseMessage.RequestMessage?.RequestUri ?? throw new InvalidOperationException();
-			StatusCode = httpResponseMessage.StatusCode;
-		}
+	internal BasicResponse(HttpResponseMessage httpResponseMessage) {
+		ArgumentNullException.ThrowIfNull(httpResponseMessage);
 
-		internal BasicResponse(BasicResponse basicResponse) {
-			if (basicResponse == null) {
-				throw new ArgumentNullException(nameof(basicResponse));
-			}
+		FinalUri = httpResponseMessage.Headers.Location ?? httpResponseMessage.RequestMessage?.RequestUri ?? throw new InvalidOperationException();
+		StatusCode = httpResponseMessage.StatusCode;
+	}
 
-			FinalUri = basicResponse.FinalUri;
-			StatusCode = basicResponse.StatusCode;
-		}
+	internal BasicResponse(BasicResponse basicResponse) {
+		ArgumentNullException.ThrowIfNull(basicResponse);
+
+		FinalUri = basicResponse.FinalUri;
+		StatusCode = basicResponse.StatusCode;
 	}
 }

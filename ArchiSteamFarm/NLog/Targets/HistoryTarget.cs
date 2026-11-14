@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,59 +29,59 @@ using JetBrains.Annotations;
 using NLog;
 using NLog.Targets;
 
-namespace ArchiSteamFarm.NLog.Targets {
-	[Target(TargetName)]
-	internal sealed class HistoryTarget : TargetWithLayout {
-		internal const string TargetName = "History";
+namespace ArchiSteamFarm.NLog.Targets;
 
-		private const byte DefaultMaxCount = 20;
+[Target("History")]
+internal sealed class HistoryTarget : TargetWithLayout {
+	private const byte DefaultMaxCount = 20;
 
-		internal IEnumerable<string> ArchivedMessages => HistoryQueue;
+	internal IEnumerable<string> ArchivedMessages => HistoryQueue;
 
-		private readonly FixedSizeConcurrentQueue<string> HistoryQueue = new(DefaultMaxCount);
+	private readonly FixedSizeConcurrentQueue<string> HistoryQueue = new(DefaultMaxCount);
 
-		// This is NLog config property, it must have public get() and set() capabilities
-		[PublicAPI]
-		public byte MaxCount {
-			get => HistoryQueue.MaxCount;
+	// This is NLog config property, it must have public get() and set() capabilities
+	[UsedImplicitly]
+	public byte MaxCount {
+		get => HistoryQueue.MaxCount;
 
-			set {
-				if (value == 0) {
-					ASF.ArchiLogger.LogNullError(nameof(value));
+		set {
+			if (value == 0) {
+				ASF.ArchiLogger.LogNullError(value);
 
-					return;
-				}
-
-				HistoryQueue.MaxCount = value;
-			}
-		}
-
-		// This parameter-less constructor is intentionally public, as NLog uses it for creating targets
-		// It must stay like this as we want to have our targets defined in our NLog.config
-		[PublicAPI]
-		public HistoryTarget() { }
-
-		internal HistoryTarget(string name) : this() => Name = name;
-
-		protected override void Write(LogEventInfo logEvent) {
-			if (logEvent == null) {
-				throw new ArgumentNullException(nameof(logEvent));
+				return;
 			}
 
-			base.Write(logEvent);
-
-			string message = Layout.Render(logEvent);
-
-			HistoryQueue.Enqueue(message);
-			NewHistoryEntry?.Invoke(this, new NewHistoryEntryArgs(message));
+			HistoryQueue.MaxCount = value;
 		}
+	}
 
-		internal event EventHandler<NewHistoryEntryArgs>? NewHistoryEntry;
+	// This parameter-less constructor is intentionally public, as NLog uses it for creating targets
+	// It must stay like this as we want to have our targets defined in our NLog.config
+	[UsedImplicitly]
+	public HistoryTarget() { }
 
-		internal sealed class NewHistoryEntryArgs : EventArgs {
-			internal readonly string Message;
+	internal HistoryTarget(string name) : this() => Name = name;
 
-			internal NewHistoryEntryArgs(string message) => Message = message ?? throw new ArgumentNullException(nameof(message));
+	protected override void Write(LogEventInfo logEvent) {
+		ArgumentNullException.ThrowIfNull(logEvent);
+
+		base.Write(logEvent);
+
+		string message = Layout.Render(logEvent);
+
+		HistoryQueue.Enqueue(message);
+		NewHistoryEntry?.Invoke(this, new NewHistoryEntryArgs(message));
+	}
+
+	internal event EventHandler<NewHistoryEntryArgs>? NewHistoryEntry;
+
+	internal sealed class NewHistoryEntryArgs : EventArgs {
+		internal readonly string Message;
+
+		internal NewHistoryEntryArgs(string message) {
+			ArgumentNullException.ThrowIfNull(message);
+
+			Message = message;
 		}
 	}
 }

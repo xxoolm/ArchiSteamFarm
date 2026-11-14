@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,44 +22,42 @@
 // limitations under the License.
 
 using System;
+using System.Threading;
 using System.Threading.Tasks;
-using AngleSharp;
 using AngleSharp.Dom;
-using ArchiSteamFarm.Core;
+using AngleSharp.Html.Dom;
+using AngleSharp.Html.Parser;
 using JetBrains.Annotations;
 
-namespace ArchiSteamFarm.Web.Responses {
-	public sealed class HtmlDocumentResponse : BasicResponse, IDisposable {
-		[PublicAPI]
-		public IDocument Content { get; }
+namespace ArchiSteamFarm.Web.Responses;
 
-		private HtmlDocumentResponse(BasicResponse basicResponse, IDocument content) : base(basicResponse) {
-			if (basicResponse == null) {
-				throw new ArgumentNullException(nameof(basicResponse));
-			}
+public sealed class HtmlDocumentResponse : BasicResponse, IDisposable {
+	[PublicAPI]
+	public IDocument? Content { get; }
 
-			Content = content ?? throw new ArgumentNullException(nameof(content));
+	public HtmlDocumentResponse(BasicResponse basicResponse) : base(basicResponse) => ArgumentNullException.ThrowIfNull(basicResponse);
+
+	private HtmlDocumentResponse(BasicResponse basicResponse, IDocument content) : this(basicResponse) {
+		ArgumentNullException.ThrowIfNull(basicResponse);
+		ArgumentNullException.ThrowIfNull(content);
+
+		Content = content;
+	}
+
+	public void Dispose() => Content?.Dispose();
+
+	[PublicAPI]
+	public static async Task<HtmlDocumentResponse> Create(StreamResponse streamResponse, CancellationToken cancellationToken = default) {
+		ArgumentNullException.ThrowIfNull(streamResponse);
+
+		if (streamResponse.Content == null) {
+			throw new InvalidOperationException(nameof(streamResponse.Content));
 		}
 
-		public void Dispose() => Content.Dispose();
+		HtmlParser htmlParser = new();
 
-		[PublicAPI]
-		public static async Task<HtmlDocumentResponse?> Create(StreamResponse streamResponse) {
-			if (streamResponse == null) {
-				throw new ArgumentNullException(nameof(streamResponse));
-			}
+		IHtmlDocument document = await htmlParser.ParseDocumentAsync(streamResponse.Content, cancellationToken).ConfigureAwait(false);
 
-			IBrowsingContext context = BrowsingContext.New();
-
-			try {
-				IDocument document = await context.OpenAsync(req => req.Content(streamResponse.Content, true)).ConfigureAwait(false);
-
-				return new HtmlDocumentResponse(streamResponse, document);
-			} catch (Exception e) {
-				ASF.ArchiLogger.LogGenericWarningException(e);
-
-				return null;
-			}
-		}
+		return new HtmlDocumentResponse(streamResponse, document);
 	}
 }

@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,17 +24,18 @@
 using System;
 using JetBrains.Annotations;
 
-namespace ArchiSteamFarm.Web.Responses {
-	public sealed class ObjectResponse<T> : BasicResponse {
-		[PublicAPI]
-		public T Content { get; }
+namespace ArchiSteamFarm.Web.Responses;
 
-		public ObjectResponse(BasicResponse basicResponse, T content) : base(basicResponse) {
-			if (basicResponse == null) {
-				throw new ArgumentNullException(nameof(basicResponse));
-			}
+public sealed class ObjectResponse<T> : BasicResponse {
+	[PublicAPI]
+	public T? Content { get; }
 
-			Content = content ?? throw new ArgumentNullException(nameof(content));
-		}
+	public ObjectResponse(BasicResponse basicResponse, T content) : this(basicResponse) {
+		ArgumentNullException.ThrowIfNull(basicResponse);
+		ArgumentNullException.ThrowIfNull(content);
+
+		Content = content;
 	}
+
+	public ObjectResponse(BasicResponse basicResponse) : base(basicResponse) => ArgumentNullException.ThrowIfNull(basicResponse);
 }

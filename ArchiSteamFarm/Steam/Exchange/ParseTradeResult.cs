@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,46 +23,39 @@
 
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.ComponentModel;
-using System.Linq;
 using ArchiSteamFarm.Steam.Data;
 using JetBrains.Annotations;
 
-namespace ArchiSteamFarm.Steam.Exchange {
-	public sealed class ParseTradeResult {
-		[PublicAPI]
-		public EResult Result { get; }
+namespace ArchiSteamFarm.Steam.Exchange;
 
-		[PublicAPI]
-		public ulong TradeOfferID { get; }
+public sealed class ParseTradeResult {
+	[PublicAPI]
+	public IReadOnlyCollection<Asset>? ItemsToGive { get; }
 
-		internal readonly ImmutableHashSet<Asset.EType>? ReceivedItemTypes;
+	[PublicAPI]
+	public IReadOnlyCollection<Asset>? ItemsToReceive { get; }
 
-		internal ParseTradeResult(ulong tradeOfferID, EResult result, IReadOnlyCollection<Asset>? itemsToReceive = null) {
-			if (tradeOfferID == 0) {
-				throw new ArgumentOutOfRangeException(nameof(tradeOfferID));
-			}
+	[PublicAPI]
+	public ETradeResult Result { get; }
 
-			if ((result == EResult.Unknown) || !Enum.IsDefined(typeof(EResult), result)) {
-				throw new InvalidEnumArgumentException(nameof(result), (int) result, typeof(EResult));
-			}
+	[PublicAPI]
+	public ulong TradeOfferID { get; }
 
-			TradeOfferID = tradeOfferID;
-			Result = result;
+	[PublicAPI]
+	public bool Confirmed { get; internal set; }
 
-			if (itemsToReceive?.Count > 0) {
-				ReceivedItemTypes = itemsToReceive.Select(item => item.Type).ToImmutableHashSet();
-			}
+	internal ParseTradeResult(ulong tradeOfferID, ETradeResult result, bool requiresMobileConfirmation, IReadOnlyCollection<Asset>? itemsToGive = null, IReadOnlyCollection<Asset>? itemsToReceive = null) {
+		ArgumentOutOfRangeException.ThrowIfZero(tradeOfferID);
+
+		if ((result == ETradeResult.Unknown) || !Enum.IsDefined(result)) {
+			throw new InvalidEnumArgumentException(nameof(result), (int) result, typeof(ETradeResult));
 		}
 
-		public enum EResult : byte {
-			Unknown,
-			Accepted,
-			Blacklisted,
-			Ignored,
-			Rejected,
-			TryAgain
-		}
+		TradeOfferID = tradeOfferID;
+		Result = result;
+		Confirmed = !requiresMobileConfirmation;
+		ItemsToGive = itemsToGive;
+		ItemsToReceive = itemsToReceive;
 	}
 }

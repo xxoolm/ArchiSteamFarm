@@ -1,10 +1,12 @@
+// ----------------------------------------------------------------------------------------------
 //     _                _      _  ____   _                           _____
 //    / \    _ __  ___ | |__  (_)/ ___| | |_  ___   __ _  _ __ ___  |  ___|__ _  _ __  _ __ ___
 //   / _ \  | '__|/ __|| '_ \ | |\___ \ | __|/ _ \ / _` || '_ ` _ \ | |_  / _` || '__|| '_ ` _ \
 //  / ___ \ | |  | (__ | | | || | ___) || |_|  __/| (_| || | | | | ||  _|| (_| || |   | | | | | |
 // /_/   \_\|_|   \___||_| |_||_||____/  \__|\___| \__,_||_| |_| |_||_|   \__,_||_|   |_| |_| |_|
+// ----------------------------------------------------------------------------------------------
 // |
-// Copyright 2015-2021 Łukasz "JustArchi" Domeradzki
+// Copyright 2015-2026 Łukasz "JustArchi" Domeradzki
 // Contact: JustArchi@JustArchi.net
 // |
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,445 +22,385 @@
 // limitations under the License.
 
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using AngleSharp.Dom;
 using ArchiSteamFarm.Core;
 using ArchiSteamFarm.Helpers;
 using ArchiSteamFarm.Localization;
+using ArchiSteamFarm.Steam.Data;
 using ArchiSteamFarm.Storage;
-using Newtonsoft.Json;
+using SteamKit2;
 
-namespace ArchiSteamFarm.Steam.Security {
-	[SuppressMessage("ReSharper", "ClassCannotBeInstantiated")]
-	public sealed class MobileAuthenticator : IDisposable {
-		internal const byte BackupCodeDigits = 7;
-		internal const byte CodeDigits = 5;
+namespace ArchiSteamFarm.Steam.Security;
 
-		private const byte CodeInterval = 30;
+[SuppressMessage("ReSharper", "ClassCannotBeInstantiated")]
+public sealed class MobileAuthenticator : IDisposable {
+	internal const byte BackupCodeDigits = 7;
+	internal const byte CodeDigits = 5;
 
-		// For how many hours we can assume that SteamTimeDifference is correct
-		private const byte SteamTimeTTL = 24;
+	private const byte CodeInterval = 30;
 
-		internal static readonly ImmutableSortedSet<char> CodeCharacters = ImmutableSortedSet.Create('2', '3', '4', '5', '6', '7', '8', '9', 'B', 'C', 'D', 'F', 'G', 'H', 'J', 'K', 'M', 'N', 'P', 'Q', 'R', 'T', 'V', 'W', 'X', 'Y');
+	// For how many minutes we can assume that SteamTimeDifference is correct
+	private const byte SteamTimeTTL = 15;
 
-		private static readonly SemaphoreSlim TimeSemaphore = new(1, 1);
+	internal static readonly ImmutableSortedSet<char> CodeCharacters = ['2', '3', '4', '5', '6', '7', '8', '9', 'B', 'C', 'D', 'F', 'G', 'H', 'J', 'K', 'M', 'N', 'P', 'Q', 'R', 'T', 'V', 'W', 'X', 'Y'];
 
-		private static DateTime LastSteamTimeCheck;
-		private static int? SteamTimeDifference;
+	private static readonly SemaphoreSlim TimeSemaphore = new(1, 1);
 
-		private readonly ArchiCacheable<string> CachedDeviceID;
+	private static DateTime LastSteamTimeCheck;
+	private static int? SteamTimeDifference;
 
-		[JsonProperty(PropertyName = "identity_secret", Required = Required.Always)]
-		private readonly string IdentitySecret = "";
+	private readonly ArchiCacheable<string> CachedDeviceID;
 
-		[JsonProperty(PropertyName = "shared_secret", Required = Required.Always)]
-		private readonly string SharedSecret = "";
+	private Bot? Bot;
 
-		private Bot? Bot;
+	[JsonInclude]
+	[JsonPropertyName("identity_secret")]
+	[JsonRequired]
+	private string IdentitySecret { get; init; } = "";
 
-		[JsonConstructor]
-		private MobileAuthenticator() => CachedDeviceID = new ArchiCacheable<string>(ResolveDeviceID);
+	[JsonInclude]
+	[JsonPropertyName("shared_secret")]
+	[JsonRequired]
+	private string SharedSecret { get; init; } = "";
 
-		public void Dispose() => CachedDeviceID.Dispose();
+	[JsonConstructor]
+	private MobileAuthenticator() => CachedDeviceID = new ArchiCacheable<string>(ResolveDeviceID);
 
-		internal async Task<string?> GenerateToken() {
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
-			}
+	public void Dispose() => CachedDeviceID.Dispose();
 
-			uint time = await GetSteamTime().ConfigureAwait(false);
-
-			if (time == 0) {
-				throw new InvalidOperationException(nameof(time));
-			}
-
-			return GenerateTokenForTime(time);
+	internal async Task<string?> GenerateToken(CancellationToken cancellationToken = default) {
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
 		}
 
-		internal async Task<HashSet<Confirmation>?> GetConfirmations() {
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
-			}
+		ulong time = await GetSteamTime(cancellationToken).ConfigureAwait(false);
 
-			(bool success, string? deviceID) = await CachedDeviceID.GetValue().ConfigureAwait(false);
-
-			if (!success || string.IsNullOrEmpty(deviceID)) {
-				Bot.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningFailedWithError, nameof(deviceID)));
-
-				return null;
-			}
-
-			uint time = await GetSteamTime().ConfigureAwait(false);
-
-			if (time == 0) {
-				throw new InvalidOperationException(nameof(time));
-			}
-
-			string? confirmationHash = GenerateConfirmationHash(time, "conf");
-
-			if (string.IsNullOrEmpty(confirmationHash)) {
-				Bot.ArchiLogger.LogNullError(nameof(confirmationHash));
-
-				return null;
-			}
-
-			await LimitConfirmationsRequestsAsync().ConfigureAwait(false);
-
-			using IDocument? htmlDocument = await Bot.ArchiWebHandler.GetConfirmationsPage(deviceID!, confirmationHash!, time).ConfigureAwait(false);
-
-			if (htmlDocument == null) {
-				return null;
-			}
-
-			IEnumerable<IElement> confirmationNodes = htmlDocument.SelectNodes("//div[@class='mobileconf_list_entry']");
-
-			HashSet<Confirmation> result = new();
-
-			foreach (IElement confirmationNode in confirmationNodes) {
-				string? idText = confirmationNode.GetAttribute("data-confid");
-
-				if (string.IsNullOrEmpty(idText)) {
-					Bot.ArchiLogger.LogNullError(nameof(idText));
-
-					return null;
-				}
-
-				if (!ulong.TryParse(idText, out ulong id) || (id == 0)) {
-					Bot.ArchiLogger.LogNullError(nameof(id));
-
-					return null;
-				}
-
-				string? keyText = confirmationNode.GetAttribute("data-key");
-
-				if (string.IsNullOrEmpty(keyText)) {
-					Bot.ArchiLogger.LogNullError(nameof(keyText));
-
-					return null;
-				}
-
-				if (!ulong.TryParse(keyText, out ulong key) || (key == 0)) {
-					Bot.ArchiLogger.LogNullError(nameof(key));
-
-					return null;
-				}
-
-				string? creatorText = confirmationNode.GetAttribute("data-creator");
-
-				if (string.IsNullOrEmpty(creatorText)) {
-					Bot.ArchiLogger.LogNullError(nameof(creatorText));
-
-					return null;
-				}
-
-				if (!ulong.TryParse(creatorText, out ulong creator) || (creator == 0)) {
-					Bot.ArchiLogger.LogNullError(nameof(creator));
-
-					return null;
-				}
-
-				string? typeText = confirmationNode.GetAttribute("data-type");
-
-				if (string.IsNullOrEmpty(typeText)) {
-					Bot.ArchiLogger.LogNullError(nameof(typeText));
-
-					return null;
-				}
-
-				if (!Enum.TryParse(typeText, out Confirmation.EType type) || (type == Confirmation.EType.Unknown)) {
-					Bot.ArchiLogger.LogNullError(nameof(type));
-
-					return null;
-				}
-
-				if (!Enum.IsDefined(typeof(Confirmation.EType), type)) {
-					Bot.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningUnknownValuePleaseReport, nameof(type), type));
-
-					return null;
-				}
-
-				result.Add(new Confirmation(id, key, creator, type));
-			}
-
-			return result;
+		if (time == 0) {
+			throw new InvalidOperationException(nameof(time));
 		}
 
-		internal async Task<bool> HandleConfirmations(IReadOnlyCollection<Confirmation> confirmations, bool accept) {
-			if ((confirmations == null) || (confirmations.Count == 0)) {
-				throw new ArgumentNullException(nameof(confirmations));
-			}
+		return GenerateTokenForTime(time);
+	}
 
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
-			}
+	internal string? GenerateTokenForTime(ulong time) {
+		ArgumentOutOfRangeException.ThrowIfZero(time);
 
-			(bool success, string? deviceID) = await CachedDeviceID.GetValue().ConfigureAwait(false);
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
+		}
 
-			if (!success || string.IsNullOrEmpty(deviceID)) {
-				Bot.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.WarningFailedWithError, nameof(deviceID)));
+		if (string.IsNullOrEmpty(SharedSecret)) {
+			throw new InvalidOperationException(nameof(SharedSecret));
+		}
 
-				return false;
-			}
+		Span<byte> sharedSecret = stackalloc byte[32];
 
-			uint time = await GetSteamTime().ConfigureAwait(false);
+		if (!Convert.TryFromBase64String(SharedSecret, sharedSecret, out int bytesWritten) && !TryFromBase64StringRelaxed(SharedSecret, sharedSecret, out bytesWritten)) {
+			Bot.ArchiLogger.LogGenericError(Strings.FormatErrorIsInvalid(nameof(SharedSecret)));
 
-			if (time == 0) {
-				throw new InvalidOperationException(nameof(time));
-			}
+			return null;
+		}
 
-			string? confirmationHash = GenerateConfirmationHash(time, "conf");
+		sharedSecret = sharedSecret[..bytesWritten];
 
-			if (string.IsNullOrEmpty(confirmationHash)) {
-				Bot.ArchiLogger.LogNullError(nameof(confirmationHash));
+		Span<byte> timeArray = stackalloc byte[sizeof(long)];
+		BinaryPrimitives.WriteInt64BigEndian(timeArray, (long) (time / CodeInterval));
 
-				return false;
-			}
+		Span<byte> hash = stackalloc byte[HMACSHA1.HashSizeInBytes];
 
-			bool? result = await Bot.ArchiWebHandler.HandleConfirmations(deviceID!, confirmationHash!, time, confirmations, accept).ConfigureAwait(false);
+#pragma warning disable CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
+		HMACSHA1.HashData(sharedSecret, timeArray, hash);
+#pragma warning restore CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
 
-			if (!result.HasValue) {
-				// Request timed out
-				return false;
-			}
+		// The last 4 bits of the mac say where the code starts
+		int start = hash[^1] & 0x0f;
 
-			if (result.Value) {
-				// Request succeeded
-				return true;
-			}
+		// Extract those 4 bytes
+		Span<byte> bytes = hash[start..(start + 4)];
 
-			// Our multi request failed, this is almost always Steam issue that happens randomly
-			// In this case, we'll accept all pending confirmations one-by-one, synchronously (as Steam can't handle them in parallel)
-			// We totally ignore actual result returned by those calls, abort only if request timed out
-			foreach (Confirmation confirmation in confirmations) {
-				bool? confirmationResult = await Bot.ArchiWebHandler.HandleConfirmation(deviceID!, confirmationHash!, time, confirmation.ID, confirmation.Key, accept).ConfigureAwait(false);
+		// Build the alphanumeric code
+		uint fullCode = BinaryPrimitives.ReadUInt32BigEndian(bytes) & 0x7fffffff;
 
-				if (!confirmationResult.HasValue) {
-					return false;
+		return string.Create(
+			CodeDigits, fullCode, static (buffer, state) => {
+				for (byte i = 0; i < CodeDigits; i++) {
+					buffer[i] = CodeCharacters[(byte) (state % CodeCharacters.Count)];
+					state /= (byte) CodeCharacters.Count;
 				}
 			}
+		);
+	}
 
+	internal async Task<ImmutableHashSet<Confirmation>?> GetConfirmations(CancellationToken cancellationToken = default) {
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
+		}
+
+		(_, string? deviceID) = await CachedDeviceID.GetValue(ECacheFallback.SuccessPreviously, cancellationToken).ConfigureAwait(false);
+
+		if (string.IsNullOrEmpty(deviceID)) {
+			Bot.ArchiLogger.LogGenericError(Strings.FormatWarningFailedWithError(nameof(deviceID)));
+
+			return null;
+		}
+
+		await LimitConfirmationsRequestsAsync(cancellationToken).ConfigureAwait(false);
+
+		ulong time = await GetSteamTime(cancellationToken).ConfigureAwait(false);
+
+		if (time == 0) {
+			throw new InvalidOperationException(nameof(time));
+		}
+
+		string? confirmationHash = GenerateConfirmationHash(time, "conf");
+
+		if (string.IsNullOrEmpty(confirmationHash)) {
+			Bot.ArchiLogger.LogNullError(confirmationHash);
+
+			return null;
+		}
+
+		ConfirmationsResponse? response = await Bot.ArchiWebHandler.GetConfirmations(deviceID, confirmationHash, time, cancellationToken).ConfigureAwait(false);
+
+		if (response?.Success != true) {
+			return null;
+		}
+
+		foreach (Confirmation confirmation in response.Confirmations.Where(static confirmation => (confirmation.ConfirmationType == EMobileConfirmationType.Invalid) || !Enum.IsDefined(confirmation.ConfirmationType))) {
+			Bot.ArchiLogger.LogGenericError(Strings.FormatWarningUnknownValuePleaseReport(nameof(confirmation.ConfirmationType), $"{confirmation.ConfirmationType} ({confirmation.ConfirmationTypeName ?? "null"})"));
+		}
+
+		return response.Confirmations;
+	}
+
+	internal async Task<ulong> GetSteamTime(CancellationToken cancellationToken = default) {
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
+		}
+
+		int? steamTimeDifference = SteamTimeDifference;
+
+		if (steamTimeDifference.HasValue && (DateTime.UtcNow.Subtract(LastSteamTimeCheck).TotalMinutes < SteamTimeTTL)) {
+			return Utilities.MathAdd(Utilities.GetUnixTime(), steamTimeDifference.Value);
+		}
+
+		await TimeSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		try {
+			steamTimeDifference = SteamTimeDifference;
+
+			if (steamTimeDifference.HasValue && (DateTime.UtcNow.Subtract(LastSteamTimeCheck).TotalMinutes < SteamTimeTTL)) {
+				return Utilities.MathAdd(Utilities.GetUnixTime(), steamTimeDifference.Value);
+			}
+
+			ulong serverTime = await Bot.ArchiHandler.GetServerTime().ConfigureAwait(false);
+
+			if (serverTime == 0) {
+				return Utilities.GetUnixTime();
+			}
+
+			// We assume that the difference between times will be within int range, therefore we accept underflow here (for subtraction), and since we cast that result to int afterwards, we also accept overflow for the cast itself
+			steamTimeDifference = unchecked((int) (serverTime - Utilities.GetUnixTime()));
+
+			SteamTimeDifference = steamTimeDifference;
+			LastSteamTimeCheck = DateTime.UtcNow;
+		} finally {
+			TimeSemaphore.Release();
+		}
+
+		return Utilities.MathAdd(Utilities.GetUnixTime(), steamTimeDifference.Value);
+	}
+
+	internal async Task<bool> HandleConfirmations(IReadOnlyCollection<Confirmation> confirmations, bool accept, CancellationToken cancellationToken = default) {
+		if ((confirmations == null) || (confirmations.Count == 0)) {
+			throw new ArgumentNullException(nameof(confirmations));
+		}
+
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
+		}
+
+		(_, string? deviceID) = await CachedDeviceID.GetValue(ECacheFallback.SuccessPreviously, cancellationToken).ConfigureAwait(false);
+
+		if (string.IsNullOrEmpty(deviceID)) {
+			Bot.ArchiLogger.LogGenericError(Strings.FormatWarningFailedWithError(nameof(deviceID)));
+
+			return false;
+		}
+
+		ulong time = await GetSteamTime(cancellationToken).ConfigureAwait(false);
+
+		if (time == 0) {
+			throw new InvalidOperationException(nameof(time));
+		}
+
+		string? confirmationHash = GenerateConfirmationHash(time, "conf");
+
+		if (string.IsNullOrEmpty(confirmationHash)) {
+			Bot.ArchiLogger.LogNullError(confirmationHash);
+
+			return false;
+		}
+
+		bool? result = await Bot.ArchiWebHandler.HandleConfirmations(deviceID, confirmationHash, time, confirmations, accept, cancellationToken).ConfigureAwait(false);
+
+		if (!result.HasValue) {
+			// Request timed out
+			return false;
+		}
+
+		if (result.Value) {
+			// Request succeeded
 			return true;
 		}
 
-		internal void Init(Bot bot) => Bot = bot ?? throw new ArgumentNullException(nameof(bot));
+		// Our multi request failed, this is almost always Steam issue that happens randomly
+		// In this case, we'll accept all pending confirmations one-by-one, synchronously (as Steam can't handle them in parallel)
+		// We totally ignore actual result returned by those calls, abort only if request timed out
+		foreach (Confirmation confirmation in confirmations) {
+			bool? confirmationResult = await Bot.ArchiWebHandler.HandleConfirmation(deviceID, confirmationHash, time, confirmation.ID, confirmation.Nonce, accept, cancellationToken).ConfigureAwait(false);
 
-		internal static async Task ResetSteamTimeDifference() {
+			if (!confirmationResult.HasValue) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	internal void Init(Bot bot) {
+		ArgumentNullException.ThrowIfNull(bot);
+
+		Bot = bot;
+	}
+
+	internal void OnInitModules() => Utilities.InBackground(() => CachedDeviceID.Reset());
+
+	internal static async Task ResetSteamTimeDifference(CancellationToken cancellationToken = default) {
+		if ((SteamTimeDifference == null) && (LastSteamTimeCheck == DateTime.MinValue)) {
+			return;
+		}
+
+		if (!await TimeSemaphore.WaitAsync(0, cancellationToken).ConfigureAwait(false)) {
+			// Resolve or reset is already in-progress
+			return;
+		}
+
+		try {
 			if ((SteamTimeDifference == null) && (LastSteamTimeCheck == DateTime.MinValue)) {
 				return;
 			}
 
-			if (!await TimeSemaphore.WaitAsync(0).ConfigureAwait(false)) {
-				// Resolve or reset is already in-progress
-				return;
-			}
+			SteamTimeDifference = null;
+			LastSteamTimeCheck = DateTime.MinValue;
+		} finally {
+			TimeSemaphore.Release();
+		}
+	}
 
-			try {
-				if ((SteamTimeDifference == null) && (LastSteamTimeCheck == DateTime.MinValue)) {
-					return;
-				}
+	private string? GenerateConfirmationHash(ulong time, string? tag = null) {
+		ArgumentOutOfRangeException.ThrowIfZero(time);
 
-				SteamTimeDifference = null;
-				LastSteamTimeCheck = DateTime.MinValue;
-			} finally {
-				TimeSemaphore.Release();
-			}
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
 		}
 
-		private string? GenerateConfirmationHash(uint time, string? tag = null) {
-			if (time == 0) {
-				throw new ArgumentOutOfRangeException(nameof(time));
-			}
+		if (string.IsNullOrEmpty(IdentitySecret)) {
+			throw new InvalidOperationException(nameof(IdentitySecret));
+		}
 
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
-			}
+		Span<byte> identitySecret = stackalloc byte[32];
 
-			if (string.IsNullOrEmpty(IdentitySecret)) {
-				throw new InvalidOperationException(nameof(IdentitySecret));
-			}
+		if (!Convert.TryFromBase64String(IdentitySecret, identitySecret, out int bytesWritten) && !TryFromBase64StringRelaxed(IdentitySecret, identitySecret, out bytesWritten)) {
+			Bot.ArchiLogger.LogGenericError(Strings.FormatErrorIsInvalid(nameof(IdentitySecret)));
 
-			byte[] identitySecret;
+			return null;
+		}
 
-			try {
-				identitySecret = Convert.FromBase64String(IdentitySecret!);
-			} catch (FormatException e) {
-				Bot.ArchiLogger.LogGenericException(e);
-				Bot.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.ErrorIsInvalid, nameof(IdentitySecret)));
+		identitySecret = identitySecret[..bytesWritten];
 
-				return null;
-			}
+		byte tagLength = string.IsNullOrEmpty(tag) ? (byte) 0 : (byte) Math.Min(32, tag.Length);
 
-			byte bufferSize = 8;
+		Span<byte> buffer = stackalloc byte[sizeof(ulong) + tagLength];
+		BinaryPrimitives.WriteUInt64BigEndian(buffer, time);
 
-			if (!string.IsNullOrEmpty(tag)) {
-				bufferSize += (byte) Math.Min(32, tag!.Length);
-			}
+		if (tagLength > 0) {
+			Encoding.UTF8.GetBytes(tag.AsSpan(0, tagLength), buffer[sizeof(ulong)..]);
+		}
 
-			byte[] timeArray = BitConverter.GetBytes((ulong) time);
-
-			if (BitConverter.IsLittleEndian) {
-				Array.Reverse(timeArray);
-			}
-
-			byte[] buffer = new byte[bufferSize];
-
-			Array.Copy(timeArray, buffer, 8);
-
-			if (!string.IsNullOrEmpty(tag)) {
-				Array.Copy(Encoding.UTF8.GetBytes(tag!), 0, buffer, 8, bufferSize - 8);
-			}
-
-			byte[] hash;
+		Span<byte> hash = stackalloc byte[HMACSHA1.HashSizeInBytes];
 
 #pragma warning disable CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
-			using (HMACSHA1 hmac = new(identitySecret)) {
-				hash = hmac.ComputeHash(buffer);
-			}
+		HMACSHA1.HashData(identitySecret, buffer, hash);
 #pragma warning restore CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
 
-			return Convert.ToBase64String(hash);
+		return Convert.ToBase64String(hash);
+	}
+
+	private static async Task LimitConfirmationsRequestsAsync(CancellationToken cancellationToken = default) {
+		if (ASF.ConfirmationsSemaphore == null) {
+			throw new InvalidOperationException(nameof(ASF.ConfirmationsSemaphore));
 		}
 
-		private string? GenerateTokenForTime(uint time) {
-			if (time == 0) {
-				throw new ArgumentOutOfRangeException(nameof(time));
-			}
+		byte confirmationsLimiterDelay = ASF.GlobalConfig?.ConfirmationsLimiterDelay ?? GlobalConfig.DefaultConfirmationsLimiterDelay;
 
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
-			}
-
-			if (string.IsNullOrEmpty(SharedSecret)) {
-				throw new InvalidOperationException(nameof(SharedSecret));
-			}
-
-			byte[] sharedSecret;
-
-			try {
-				sharedSecret = Convert.FromBase64String(SharedSecret!);
-			} catch (FormatException e) {
-				Bot.ArchiLogger.LogGenericException(e);
-				Bot.ArchiLogger.LogGenericError(string.Format(CultureInfo.CurrentCulture, Strings.ErrorIsInvalid, nameof(SharedSecret)));
-
-				return null;
-			}
-
-			byte[] timeArray = BitConverter.GetBytes((ulong) (time / CodeInterval));
-
-			if (BitConverter.IsLittleEndian) {
-				Array.Reverse(timeArray);
-			}
-
-			byte[] hash;
-
-#pragma warning disable CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
-			using (HMACSHA1 hmac = new(sharedSecret)) {
-				hash = hmac.ComputeHash(timeArray);
-			}
-#pragma warning restore CA5350 // This is actually a fair warning, but there is nothing we can do about Steam using weak cryptographic algorithms
-
-			// The last 4 bits of the mac say where the code starts
-			int start = hash[^1] & 0x0f;
-
-			// Extract those 4 bytes
-			byte[] bytes = new byte[4];
-
-			Array.Copy(hash, start, bytes, 0, 4);
-
-			if (BitConverter.IsLittleEndian) {
-				Array.Reverse(bytes);
-			}
-
-			uint fullCode = BitConverter.ToUInt32(bytes, 0) & 0x7fffffff;
-
-			// Build the alphanumeric code
-			char[] code = new char[CodeDigits];
-
-			for (byte i = 0; i < CodeDigits; i++) {
-				code[i] = CodeCharacters[(byte) (fullCode % CodeCharacters.Count)];
-				fullCode /= (byte) CodeCharacters.Count;
-			}
-
-			return new string(code);
+		if (confirmationsLimiterDelay == 0) {
+			return;
 		}
 
-		private async Task<uint> GetSteamTime() {
-			if (Bot == null) {
-				throw new InvalidOperationException(nameof(Bot));
+		await ASF.ConfirmationsSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+		Utilities.InBackground(async () => {
+				await Task.Delay(confirmationsLimiterDelay * 1000, CancellationToken.None).ConfigureAwait(false);
+				ASF.ConfirmationsSemaphore.Release();
 			}
+		);
+	}
 
-			int? steamTimeDifference = SteamTimeDifference;
-
-			if (steamTimeDifference.HasValue && (DateTime.UtcNow.Subtract(LastSteamTimeCheck).TotalHours < SteamTimeTTL)) {
-				return (uint) (Utilities.GetUnixTime() + steamTimeDifference.Value);
-			}
-
-			await TimeSemaphore.WaitAsync().ConfigureAwait(false);
-
-			try {
-				steamTimeDifference = SteamTimeDifference;
-
-				if (steamTimeDifference.HasValue && (DateTime.UtcNow.Subtract(LastSteamTimeCheck).TotalHours < SteamTimeTTL)) {
-					return (uint) (Utilities.GetUnixTime() + steamTimeDifference.Value);
-				}
-
-				uint serverTime = await Bot.ArchiWebHandler.GetServerTime().ConfigureAwait(false);
-
-				if (serverTime == 0) {
-					return Utilities.GetUnixTime();
-				}
-
-				SteamTimeDifference = (int) (serverTime - Utilities.GetUnixTime());
-				LastSteamTimeCheck = DateTime.UtcNow;
-
-				return (uint) (Utilities.GetUnixTime() + SteamTimeDifference.Value);
-			} finally {
-				TimeSemaphore.Release();
-			}
+	private async Task<(bool Success, string? Result)> ResolveDeviceID(CancellationToken cancellationToken = default) {
+		if (Bot == null) {
+			throw new InvalidOperationException(nameof(Bot));
 		}
 
-		private static async Task LimitConfirmationsRequestsAsync() {
-			if (ASF.ConfirmationsSemaphore == null) {
-				throw new InvalidOperationException(nameof(ASF.ConfirmationsSemaphore));
-			}
+		string? deviceID = await Bot.ArchiHandler.GetTwoFactorDeviceIdentifier(Bot.SteamID).ConfigureAwait(false);
 
-			byte confirmationsLimiterDelay = ASF.GlobalConfig?.ConfirmationsLimiterDelay ?? GlobalConfig.DefaultConfirmationsLimiterDelay;
+		if (string.IsNullOrEmpty(deviceID)) {
+			Bot.ArchiLogger.LogGenericWarning(Strings.WarningFailed);
 
-			if (confirmationsLimiterDelay == 0) {
-				return;
-			}
-
-			await ASF.ConfirmationsSemaphore.WaitAsync().ConfigureAwait(false);
-
-			Utilities.InBackground(
-				async () => {
-					await Task.Delay(confirmationsLimiterDelay * 1000).ConfigureAwait(false);
-					ASF.ConfirmationsSemaphore.Release();
-				}
-			);
+			return (false, null);
 		}
 
-		private async Task<(bool Success, string? Result)> ResolveDeviceID() {
-			if (Bot == null) {
-				throw new ArgumentNullException(nameof(Bot));
-			}
+		return (true, deviceID);
+	}
 
-			string? deviceID = await Bot.ArchiHandler.GetTwoFactorDeviceIdentifier(Bot.SteamID).ConfigureAwait(false);
+	private static bool TryFromBase64StringRelaxed(string input, Span<byte> destination, out int bytesWritten) {
+		// Some real-world secrets are encoded in a non-canonical way (e.g. with non-zero bits discarded by the padding of the last base64 group), which the standard, strict base64 decoder refuses to decode. This is a lenient fallback decoder that tolerates such input
+		ArgumentNullException.ThrowIfNull(input);
 
-			if (string.IsNullOrEmpty(deviceID)) {
-				Bot.ArchiLogger.LogGenericWarning(Strings.WarningFailed);
+		ReadOnlySpan<char> inputSpan = input;
+		int length = inputSpan.TrimEnd('=').Length;
+		int paddingLength = inputSpan.Length - length;
+		int firstPadding = inputSpan.IndexOf('=');
+		int requiredBytes = ((length / 4) * 3) + (((length % 4) * 6) / 8);
 
-				return (false, null);
-			}
+		if ((inputSpan.Length == 0) || (inputSpan.Length % 4 != 0) || (paddingLength > 2) || (length % 4 == 1) || ((firstPadding >= 0) && (firstPadding != length)) || (destination.Length < requiredBytes)) {
+			bytesWritten = 0;
 
-			return (true, deviceID);
+			return false;
 		}
+
+		bool result = Convert.TryFromBase64String(input.Replace('=', 'A'), destination, out _);
+		bytesWritten = result ? requiredBytes : 0;
+
+		return result;
 	}
 }
